@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DeliFar</string>
+
+    <!-- Bottom navigation -->
+    <string name="tab_home">Գլխավոր</string>
+    <string name="tab_map">Քարտեզ</string>
+    <string name="tab_schedule">Ժամանակացույց</string>
+    <string name="tab_stores">Խանութներ</string>
+
+    <!-- Common -->
+    <string name="settings">Կարգավորումներ</string>
+    <string name="save">Պահպանել</string>
+    <string name="cancel">Չեղարկել</string>
+    <string name="edit">Խմբագրել</string>
+    <string name="delete">Ջնջել</string>
+    <string name="back">Հետ</string>
+    <string name="close">Փակել</string>
+    <string name="confirm">Հաստատել</string>
+    <string name="search">Որոնել</string>
+    <string name="clear">Մաքրել</string>
+    <string name="all">Բոլորը</string>
+    <string name="today">Այսօր</string>
+    <string name="overdue">Ժամկետանց</string>
+    <string name="upcoming">Առաջիկա</string>
+    <string name="this_week">Այս շաբաթ</string>
+    <string name="la_time_label">Լոս Անջելեսի ժամանակ</string>
+
+    <!-- Home -->
+    <string name="home_title">DeliFar</string>
+    <string name="home_today_jobs">Այսօրվա աշխատանք</string>
+    <string name="home_overdue_jobs">Ժամկետանց</string>
+    <string name="home_completed_today">Ավարտված</string>
+    <string name="home_no_work_today">Այսօրվա համար առաքումներ կամ վերցումներ չկան։</string>
+    <string name="home_add_first_store">Նախ ավելացրեք խանութ, ապա պլանավորեք առաքում կամ վերցում։</string>
+    <string name="new_job">Նոր առաքում / վերցում</string>
+    <string name="draft_banner_title">Չպահպանված սևագիր</string>
+    <string name="draft_resume">Շարունակել</string>
+    <string name="draft_discard">Ջնջել</string>
+    <string name="lines_count">%1$d տող</string>
+    <string name="line_singular">1 տող</string>
+    <string name="untimed">Առանց ժամի</string>
+
+    <!-- Job types & statuses -->
+    <string name="type_delivery">Առաքում</string>
+    <string name="type_pickup">Վերցում</string>
+    <string name="status_pending">Սպասման մեջ</string>
+    <string name="status_progress">Ընթացքում</string>
+    <string name="status_completed">Ավարտված</string>
+    <string name="status_canceled">Չեղարկված</string>
+
+    <!-- Issues -->
+    <string name="issue_partial">Մասնակի</string>
+    <string name="issue_closed">Խանութը փակ է</string>
+    <string name="issue_refused">Մերժված</string>
+    <string name="issue_other">Այլ խնդիր</string>
+
+    <!-- Stores -->
+    <string name="stores_title">Խանութներ</string>
+    <string name="add_store">Ավելացնել խանութ</string>
+    <string name="edit_store">Խմբագրել խանութը</string>
+    <string name="store_details">Խանութի տվյալներ</string>
+    <string name="active_stores">Ակտիվ</string>
+    <string name="archived_stores">Արխիվ</string>
+    <string name="no_stores_yet">Պահպանված խանութներ դեռ չկան։</string>
+    <string name="search_stores_hint">Ֆիլտրել խանութները…</string>
+    <string name="area_la">Լոս Անջելես</string>
+    <string name="area_sac">Սակրամենտո</string>
+    <string name="photon_search_hint">Խանութի անունը կամ հասցեն</string>
+    <string name="photon_search_button">Որոնել OSM</string>
+    <string name="photon_searching">Որոնում OpenStreetMap-ում…</string>
+    <string name="photon_no_results">Այս տարածքում արդյունքներ չգտնվեցին։</string>
+    <string name="photon_attribution">Որոնում Photon • © OpenStreetMap մասնակիցներ (ODbL)</string>
+    <string name="osm_attribution">© OpenStreetMap մասնակիցներ</string>
+    <string name="manual_entry">Ձեռքով մուտք</string>
+    <string name="duplicate_store_warning">Այս OpenStreetMap վայրով խանութն արդեն պահպանված է։</string>
+    <string name="store_name">Խանութի անվանում</string>
+    <string name="store_address">Ամբողջական հասցե</string>
+    <string name="store_phone">Հեռախոս (ըստ ցանկության)</string>
+    <string name="receiving_hours">Ընդունման ժամեր</string>
+    <string name="hours_unknown">Անհայտ</string>
+    <string name="hours_closed">Փակ է</string>
+    <string name="hours_open">Բաց է</string>
+    <string name="hours_windows_hint">օր.՝ 08:00-12:00;13:00-17:00</string>
+    <string name="archive_store">Արխիվացնել</string>
+    <string name="restore_store">Վերականգնել</string>
+    <string name="archive_blocked_active_jobs">Արխիվացնելուց առաջ ավարտեք կամ չեղարկեք ակտիվ առաջադրանքները։</string>
+    <string name="directions">Երթուղի</string>
+    <string name="call_store">Զանգահարել</string>
+
+    <!-- Weekdays -->
+    <string name="day_mon">Երկ</string>
+    <string name="day_tue">Երք</string>
+    <string name="day_wed">Չոր</string>
+    <string name="day_thu">Հնգ</string>
+    <string name="day_fri">Ուրբ</string>
+    <string name="day_sat">Շբթ</string>
+    <string name="day_sun">Կիր</string>
+
+    <!-- Job editor & detail -->
+    <string name="edit_job">Խմբագրել առաջադրանքը</string>
+    <string name="job_details">Առաջադրանքի մանրամասներ</string>
+    <string name="select_store">Ընտրել խանութ</string>
+    <string name="date_label">Ամսաթիվ (LA)</string>
+    <string name="time_label">Ժամ (ըստ ցանկության, ԺԺ:րր)</string>
+    <string name="product_lines">Ապրանքներ</string>
+    <string name="add_product_line">Ավելացնել ապրանք</string>
+    <string name="product_name">Ապրանք</string>
+    <string name="planned_qty">Պլան</string>
+    <string name="actual_qty">Փաստացի</string>
+    <string name="unit_label">Միավոր</string>
+    <string name="hours_warning_closed">Զգուշացում․ այս օրը խանութի ընդունումը փակ է։</string>
+    <string name="hours_warning_unknown">Նշում․ այս օրվա ընդունման ժամերը հայտնի չեն։</string>
+    <string name="hours_warning_outside">Զգուշացում․ ընտրված ժամը ընդունման ժամերից դուրս է։</string>
+    <string name="action_start">Սկսել</string>
+    <string name="action_complete">Ավարտել</string>
+    <string name="action_reopen">Վերաբացել</string>
+    <string name="action_reschedule">Տեղափոխել</string>
+    <string name="action_cancel_job">Չեղարկել</string>
+    <string name="action_report_issue">Խնդիր</string>
+    <string name="job_reminder_switch">Առաջադրանքի հիշեցում</string>
+    <string name="keep_work_open">Պահել առաջադրանքը բաց</string>
+    <string name="issue_note_label">Մեկնաբանություն (ըստ ցանկության)</string>
+
+    <!-- Map -->
+    <string name="map_title">Երթուղու քարտեզ</string>
+    <string name="map_list_view">Ցուցակ</string>
+    <string name="map_canvas_view">Քարտեզ</string>
+    <string name="map_tiles_offline">Քարտեզի շերտերը անհասանելի են՝ ցուցադրվում են նշիչները և ցուցակը։</string>
+    <string name="map_jobs_at_store">Առաջադրանքներ խանութում՝ %1$d</string>
+
+    <!-- Schedule -->
+    <string name="schedule_title">Ժամանակացույց</string>
+    <string name="no_jobs_in_filter">Ընտրված ժամանակահատվածում առաջադրանքներ չկան։</string>
+
+    <!-- Settings & Backup -->
+    <string name="settings_language">Լեզու</string>
+    <string name="lang_system">Սարքի լեզու</string>
+    <string name="lang_en">English</string>
+    <string name="lang_ru">Русский</string>
+    <string name="lang_hy">Հայերեն</string>
+    <string name="settings_default_area">Որոնման հիմնական տարածք</string>
+    <string name="settings_reminders">Հիշեցումներ (LA ժամանակ)</string>
+    <string name="settings_notifications_permission">Ծանուցումների թույլտվություն</string>
+    <string name="permission_granted">Թույլատրված է</string>
+    <string name="permission_request">Թույլատրել ծանուցումները</string>
+    <string name="settings_daily_summary">Օրական ամփոփում</string>
+    <string name="settings_summary_time">Ամփոփման ժամ (ԺԺ:րր)</string>
+    <string name="settings_job_reminders">Ժամով առաջադրանքների հիշեցում</string>
+    <string name="settings_advance_minutes">Քանի րոպե առաջ</string>
+    <string name="settings_map_services">Քարտեզի և որոնման ծառայություններ</string>
+    <string name="settings_search_url">Photon որոնման HTTPS URL</string>
+    <string name="settings_tile_url">Քարտեզի HTTPS URL</string>
+    <string name="settings_reset_defaults">Վերականգնել լռելյայնը</string>
+    <string name="settings_backup">Տվյալների պահուստավորում</string>
+    <string name="export_json">Արտահանել JSON</string>
+    <string name="import_json">Ներմուծել JSON</string>
+    <string name="backup_warning">JSON պահուստները գաղտնագրված չեն և պարունակում են աշխատանքային տվյալներ։</string>
+    <string name="import_preview_title">Ներմուծման նախադիտում</string>
+    <string name="import_replace_conflicts">Փոխարինել հակասող գրառումները</string>
+    <string name="import_restore_prefs">Վերականգնել կարգավորումները</string>
+    <string name="import_apply">Կիրառել միավորումը</string>
+    <string name="settings_about">DeliFar-ի մասին</string>
+    <string name="about_text">Անցանց առաքման և վերցման կազմակերպիչ։ Քարտեզներ և որոնում © OpenStreetMap մասնակիցներ (ODbL)։</string>
+</resources>

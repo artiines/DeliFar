@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DeliFar</string>
+
+    <!-- Bottom navigation -->
+    <string name="tab_home">Главная</string>
+    <string name="tab_map">Карта</string>
+    <string name="tab_schedule">График</string>
+    <string name="tab_stores">Магазины</string>
+
+    <!-- Common -->
+    <string name="settings">Настройки</string>
+    <string name="save">Сохранить</string>
+    <string name="cancel">Отмена</string>
+    <string name="edit">Изменить</string>
+    <string name="delete">Удалить</string>
+    <string name="back">Назад</string>
+    <string name="close">Закрыть</string>
+    <string name="confirm">Подтвердить</string>
+    <string name="search">Поиск</string>
+    <string name="clear">Очистить</string>
+    <string name="all">Все</string>
+    <string name="today">Сегодня</string>
+    <string name="overdue">Просрочено</string>
+    <string name="upcoming">Предстоящие</string>
+    <string name="this_week">Эта неделя</string>
+    <string name="la_time_label">Время Лос-Анджелеса</string>
+
+    <!-- Home -->
+    <string name="home_title">DeliFar</string>
+    <string name="home_today_jobs">Задачи на сегодня</string>
+    <string name="home_overdue_jobs">Просроченные</string>
+    <string name="home_completed_today">Выполнено</string>
+    <string name="home_no_work_today">На сегодня доставок и заборов нет.</string>
+    <string name="home_add_first_store">Сначала добавьте магазин, затем создайте доставку или забор.</string>
+    <string name="new_job">Новая доставка / забор</string>
+    <string name="draft_banner_title">Несохранённый черновик</string>
+    <string name="draft_resume">Продолжить</string>
+    <string name="draft_discard">Удалить</string>
+    <string name="lines_count">%1$d поз.</string>
+    <string name="line_singular">1 поз.</string>
+    <string name="untimed">Без времени</string>
+
+    <!-- Job types & statuses -->
+    <string name="type_delivery">Доставка</string>
+    <string name="type_pickup">Забор</string>
+    <string name="status_pending">Ожидает</string>
+    <string name="status_progress">В работе</string>
+    <string name="status_completed">Выполнено</string>
+    <string name="status_canceled">Отменено</string>
+
+    <!-- Issues -->
+    <string name="issue_partial">Частично</string>
+    <string name="issue_closed">Закрыто</string>
+    <string name="issue_refused">Отказ</string>
+    <string name="issue_other">Другое</string>
+
+    <!-- Stores -->
+    <string name="stores_title">Магазины</string>
+    <string name="add_store">Добавить магазин</string>
+    <string name="edit_store">Изменить магазин</string>
+    <string name="store_details">О магазине</string>
+    <string name="active_stores">Активные</string>
+    <string name="archived_stores">Архив</string>
+    <string name="no_stores_yet">Сохранённых магазинов пока нет.</string>
+    <string name="search_stores_hint">Фильтр магазинов…</string>
+    <string name="area_la">Лос-Анджелес</string>
+    <string name="area_sac">Сакраменто</string>
+    <string name="photon_search_hint">Название магазина или адрес</string>
+    <string name="photon_search_button">Поиск OSM</string>
+    <string name="photon_searching">Поиск в OpenStreetMap…</string>
+    <string name="photon_no_results">В этой области ничего не найдено.</string>
+    <string name="photon_attribution">Поиск Photon • © участники OpenStreetMap (ODbL)</string>
+    <string name="osm_attribution">© участники OpenStreetMap</string>
+    <string name="manual_entry">Ввести вручную</string>
+    <string name="duplicate_store_warning">Магазин с этим местоположением OpenStreetMap уже сохранён.</string>
+    <string name="store_name">Название магазина</string>
+    <string name="store_address">Полный адрес</string>
+    <string name="store_phone">Телефон (необязательно)</string>
+    <string name="receiving_hours">Часы приёмки</string>
+    <string name="hours_unknown">Неизвестно</string>
+    <string name="hours_closed">Закрыто</string>
+    <string name="hours_open">Открыто</string>
+    <string name="hours_windows_hint">напр. 08:00-12:00;13:00-17:00</string>
+    <string name="archive_store">В архив</string>
+    <string name="restore_store">Восстановить</string>
+    <string name="archive_blocked_active_jobs">Завершите или отмените активные задачи перед архивацией.</string>
+    <string name="directions">Маршрут</string>
+    <string name="call_store">Позвонить</string>
+
+    <!-- Weekdays -->
+    <string name="day_mon">Пн</string>
+    <string name="day_tue">Вт</string>
+    <string name="day_wed">Ср</string>
+    <string name="day_thu">Чт</string>
+    <string name="day_fri">Пт</string>
+    <string name="day_sat">Сб</string>
+    <string name="day_sun">Вс</string>
+
+    <!-- Job editor & detail -->
+    <string name="edit_job">Изменить задачу</string>
+    <string name="job_details">Детали задачи</string>
+    <string name="select_store">Выберите магазин</string>
+    <string name="date_label">Дата (LA)</string>
+    <string name="time_label">Время (необязательно, ЧЧ:мм)</string>
+    <string name="product_lines">Товары</string>
+    <string name="add_product_line">Добавить позицию</string>
+    <string name="product_name">Товар</string>
+    <string name="planned_qty">План</string>
+    <string name="actual_qty">Факт</string>
+    <string name="unit_label">Ед.</string>
+    <string name="hours_warning_closed">Внимание: приёмка закрыта в этот день.</string>
+    <string name="hours_warning_unknown">Примечание: часы приёмки на этот день не указаны.</string>
+    <string name="hours_warning_outside">Внимание: выбранное время вне часов приёмки.</string>
+    <string name="action_start">Начать</string>
+    <string name="action_complete">Завершить</string>
+    <string name="action_reopen">Открыть снова</string>
+    <string name="action_reschedule">Перенести</string>
+    <string name="action_cancel_job">Отменить задачу</string>
+    <string name="action_report_issue">Проблема</string>
+    <string name="job_reminder_switch">Напоминание о задаче</string>
+    <string name="keep_work_open">Оставить задачу открытой</string>
+    <string name="issue_note_label">Комментарий (необязательно)</string>
+
+    <!-- Map -->
+    <string name="map_title">Карта маршрута</string>
+    <string name="map_list_view">Список</string>
+    <string name="map_canvas_view">Карта</string>
+    <string name="map_tiles_offline">Тайлы карты недоступны — отображаются метки и список.</string>
+    <string name="map_jobs_at_store">Задач в магазине: %1$d</string>
+
+    <!-- Schedule -->
+    <string name="schedule_title">График</string>
+    <string name="no_jobs_in_filter">Нет задач за выбранный период.</string>
+
+    <!-- Settings & Backup -->
+    <string name="settings_language">Язык</string>
+    <string name="lang_system">Язык устройства</string>
+    <string name="lang_en">English</string>
+    <string name="lang_ru">Русский</string>
+    <string name="lang_hy">Հայերեն</string>
+    <string name="settings_default_area">Регион поиска по умолчанию</string>
+    <string name="settings_reminders">Напоминания (время LA)</string>
+    <string name="settings_notifications_permission">Разрешение на уведомления</string>
+    <string name="permission_granted">Разрешено</string>
+    <string name="permission_request">Разрешить уведомления</string>
+    <string name="settings_daily_summary">Ежедневная сводка</string>
+    <string name="settings_summary_time">Время сводки (ЧЧ:мм)</string>
+    <string name="settings_job_reminders">Напоминания по задачам</string>
+    <string name="settings_advance_minutes">За сколько минут</string>
+    <string name="settings_map_services">Сервисы карт и поиска</string>
+    <string name="settings_search_url">HTTPS URL поиска Photon</string>
+    <string name="settings_tile_url">HTTPS URL тайлов карты</string>
+    <string name="settings_reset_defaults">Сбросить</string>
+    <string name="settings_backup">Резервная копия данных</string>
+    <string name="export_json">Экспорт JSON</string>
+    <string name="import_json">Импорт JSON</string>
+    <string name="backup_warning">JSON-копии не зашифрованы и содержат рабочие данные. Храните их безопасно.</string>
+    <string name="import_preview_title">Предпросмотр импорта</string>
+    <string name="import_replace_conflicts">Заменить конфликтующие записи</string>
+    <string name="import_restore_prefs">Восстановить настройки из копии</string>
+    <string name="import_apply">Применить слияние</string>
+    <string name="settings_about">О DeliFar</string>
+    <string name="about_text">Автономный органайзер доставок и заборов. Карты и поиск © участники OpenStreetMap (ODbL).</string>
+</resources>
