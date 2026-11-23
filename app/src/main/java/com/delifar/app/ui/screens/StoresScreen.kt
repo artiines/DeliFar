@@ -54,12 +54,15 @@ import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.launchDialer
 import com.delifar.app.ui.components.launchDirections
 import com.delifar.app.ui.components.todayHoursSummary
+import java.time.ZoneId
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StoresScreen(
     stores: List<StoreWithHours>,
     jobRows: List<JobListRow>,
+    zoneId: ZoneId,
+    canManage: Boolean,
     onAddStore: () -> Unit,
     onOpenStore: (String) -> Unit
 ) {
@@ -90,13 +93,15 @@ fun StoresScreen(
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onAddStore,
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text(lStr(R.string.add_store)) },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary
-            )
+            if (canManage) {
+                ExtendedFloatingActionButton(
+                    onClick = onAddStore,
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = { Text(lStr(R.string.add_store)) },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            }
         }
     ) { innerPadding ->
         Column(
@@ -203,7 +208,7 @@ fun StoresScreen(
                                         )
                                         Spacer(Modifier.width(5.dp))
                                         Text(
-                                            text = todayHoursSummary(swh.hours),
+                                            text = todayHoursSummary(swh.hours, zoneId),
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             maxLines = 1,

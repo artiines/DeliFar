@@ -230,7 +230,18 @@ class BackupManager(private val db: DeliFarDatabase) {
                     hoursList += StoreHoursEntity(id, day, mode, canonical)
                 }
                 parsedStores += StoreWithHours(
-                    StoreEntity(id, name, address, lat, lon, providerId, phone, created, modified, archived),
+                    StoreEntity(
+                        id = id,
+                        name = name,
+                        address = address,
+                        lat = lat,
+                        lon = lon,
+                        providerId = providerId,
+                        phone = phone,
+                        created = created,
+                        modified = modified,
+                        archived = archived
+                    ),
                     hoursList.sortedBy { it.day }
                 )
             }
@@ -314,9 +325,23 @@ class BackupManager(private val db: DeliFarDatabase) {
                 }
                 parsedJobs += JobWithItems(
                     JobEntity(
-                        id, storeId, type, date, time, status, issue, issueNote,
-                        snapshotName, snapshotAddress, snapshotLat, snapshotLon,
-                        created, modified, completed, reminderVersion, reminderEnabled
+                        id = id,
+                        storeId = storeId,
+                        type = type,
+                        date = date,
+                        time = time,
+                        status = status,
+                        issue = issue,
+                        issueNote = issueNote,
+                        snapshotName = snapshotName,
+                        snapshotAddress = snapshotAddress,
+                        snapshotLat = snapshotLat,
+                        snapshotLon = snapshotLon,
+                        created = created,
+                        modified = modified,
+                        completed = completed,
+                        reminderVersion = reminderVersion,
+                        reminderEnabled = reminderEnabled
                     ),
                     sortedItems
                 )
@@ -382,14 +407,14 @@ class BackupManager(private val db: DeliFarDatabase) {
     suspend fun applyMerge(
         backup: ParsedBackup,
         replaceConflicts: Boolean,
-        restorePreferences: Boolean
+        restorePreferences: Boolean,
+        activeCompanyId: String = ""
     ): Result<Unit> {
         return runCatching {
             db.withTransaction {
                 val existingStores = db.storeDao().getAllStoresWithHours().associateBy { it.store.id }
                 val existingJobs = db.jobDao().getAllJobsWithItems().associateBy { it.job.id }
 
-                // Compute final store map to validate merged integrity before committing
                 val finalStores = existingStores.mapValues { it.value.store }.toMutableMap()
                 val storesToWrite = mutableListOf<StoreWithHours>()
 
@@ -401,18 +426,20 @@ class BackupManager(private val db: DeliFarDatabase) {
                         else -> replaceConflicts
                     }
                     if (shouldWrite) {
-                        finalStores[incoming.store.id] = incoming.store
-                        storesToWrite += incoming
+                        val mergedStore = incoming.store.copy(
+                            companyId = cur?.store?.companyId?.ifBlank { activeCompanyId } ?: activeCompanyId
+                        )
+                        finalStores[incoming.store.id] = mergedStore
+                        storesToWrite += incoming.copy(store = mergedStore)
                     }
                 }
 
-                // Check providerId uniqueness across merged store set
                 val mergedProviders = mutableSetOf<String>()
                 for (store in finalStores.values) {
                     val pid = store.providerId
                     if (pid != null) {
                         require(mergedProviders.add(pid)) {
-                            "Merge conflict: duplicate OpenStreetMap providerId ($pid) across different store IDs."
+                            "Merge conflict: duplicate place providerId ($pid) across different store IDs."
                         }
                     }
                 }
@@ -433,11 +460,13 @@ class BackupManager(private val db: DeliFarDatabase) {
                                 "Cannot merge unfinished job '${incoming.job.id}' into archived store '${targetStore.name}'."
                             )
                         }
-                        jobsToWrite += incoming
+                        val mergedJob = incoming.job.copy(
+                            companyId = cur?.job?.companyId?.ifBlank { activeCompanyId } ?: activeCompanyId
+                        )
+                        jobsToWrite += incoming.copy(job = mergedJob)
                     }
                 }
 
-                // Also verify no existing active job is stranded on a newly archived replaced store
                 for (existingJob in existingJobs.values) {
                     val overridden = jobsToWrite.find { it.job.id == existingJob.job.id }?.job ?: existingJob.job
                     val targetStore = finalStores[overridden.storeId]
@@ -466,7 +495,13 @@ class BackupManager(private val db: DeliFarDatabase) {
     }
 
     private fun storesEqual(a: StoreWithHours, b: StoreWithHours): Boolean {
-        if (a.store != b.store) return false
+        val sa = a.store
+        val sb = b.store
+        if (sa.id != sb.id || sa.name != sb.name || sa.address != sb.address ||
+            sa.lat != sb.lat || sa.lon != sb.lon || sa.providerId != sb.providerId ||
+            sa.phone != sb.phone || sa.created != sb.created || sa.modified != sb.modified ||
+            sa.archived != sb.archived
+        ) return false
         val normA = (1..7).map { d ->
             a.hours.find { it.day == d } ?: StoreHoursEntity(a.store.id, d, HoursMode.UNKNOWN, "")
         }
@@ -477,7 +512,17 @@ class BackupManager(private val db: DeliFarDatabase) {
     }
 
     private fun jobsEqual(a: JobWithItems, b: JobWithItems): Boolean {
-        return a.job == b.job && a.sortedItems == b.sortedItems
+        val ja = a.job
+        val jb = b.job
+        val sameCore = ja.id == jb.id && ja.storeId == jb.storeId && ja.type == jb.type &&
+            ja.date == jb.date && ja.time == jb.time && ja.status == jb.status &&
+            ja.issue == jb.issue && ja.issueNote == jb.issueNote &&
+            ja.snapshotName == jb.snapshotName && ja.snapshotAddress == jb.snapshotAddress &&
+            ja.snapshotLat == jb.snapshotLat && ja.snapshotLon == jb.snapshotLon &&
+            ja.created == jb.created && ja.modified == jb.modified &&
+            ja.completed == jb.completed && ja.reminderVersion == jb.reminderVersion &&
+            ja.reminderEnabled == jb.reminderEnabled
+        return sameCore && a.sortedItems == b.sortedItems
     }
 
     private fun validatePreference(key: String, value: String) {

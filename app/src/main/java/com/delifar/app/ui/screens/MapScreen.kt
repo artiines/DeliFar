@@ -1,15 +1,8 @@
 package com.delifar.app.ui.screens
 
-import android.graphics.Bitmap
-import android.graphics.Paint
-import android.graphics.Typeface
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,54 +17,46 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Map
-import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Route
+import androidx.compose.material.icons.filled.Traffic
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableDoubleStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
 import com.delifar.app.data.JobListRow
@@ -79,35 +64,33 @@ import com.delifar.app.data.JobStatus
 import com.delifar.app.data.SearchArea
 import com.delifar.app.data.StoreWithHours
 import com.delifar.app.domain.BusinessRules
-import com.delifar.app.network.OsmProjection
-import com.delifar.app.network.OsmTileLoader
+import com.delifar.app.domain.RolePermissions
+import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.JobCard
+import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.launchDialer
 import com.delifar.app.ui.components.launchDirections
 import com.delifar.app.ui.components.todayHoursSummary
-import com.delifar.app.ui.theme.AmberAccent
-import com.delifar.app.ui.theme.ForestPrimary
+import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
-import kotlinx.coroutines.launch
-import kotlin.math.ceil
-import kotlin.math.floor
-import kotlin.math.hypot
-import kotlin.math.roundToInt
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.maps.android.compose.ComposeMapColorScheme
+import com.google.maps.android.compose.GoogleMap
+import com.google.maps.android.compose.MapProperties
+import com.google.maps.android.compose.MapType
+import com.google.maps.android.compose.MapUiSettings
+import com.google.maps.android.compose.Marker
+import com.google.maps.android.compose.MarkerState
+import com.google.maps.android.compose.Polyline
+import com.google.maps.android.compose.rememberCameraPositionState
+import java.time.ZoneId
 
-enum class MapFilter { TODAY, OVERDUE, UPCOMING, ALL_STORES }
-
-private data class StoreMapPin(
-    val store: StoreWithHours,
-    val jobs: List<JobListRow>,
-    val hasOverdue: Boolean
-)
-
-private data class MapCluster(
-    val screenX: Float,
-    val screenY: Float,
-    val pins: List<StoreMapPin>
-)
+enum class MapDateFilter { TODAY, OVERDUE, WEEK, ALL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -115,47 +98,75 @@ fun MapScreen(
     stores: List<StoreWithHours>,
     jobRows: List<JobListRow>,
     defaultArea: String,
-    tileUrlTemplate: String,
-    tileLoader: OsmTileLoader,
+    zoneId: ZoneId,
+    userRole: String,
+    viewModel: DeliFarViewModel,
     onOpenStore: (String) -> Unit,
     onOpenJob: (String) -> Unit,
     onNewJobForStore: (String) -> Unit
 ) {
     val context = LocalContext.current
-    val todayLa = remember { BusinessRules.todayLa() }
-    val todayIso = todayLa.toString()
+    val routeState by viewModel.routeState.collectAsState()
+    val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
+    val (weekStart, weekEnd) = remember(today) { BusinessRules.weekRange(today) }
 
-    var filter by remember { mutableStateOf(MapFilter.TODAY) }
+    var filter by remember { mutableStateOf(MapDateFilter.TODAY) }
     var listMode by remember { mutableStateOf(false) }
-    var selectedPin by remember { mutableStateOf<StoreMapPin?>(null) }
+    var selectedStoreId by remember { mutableStateOf<String?>(null) }
+    var trafficEnabled by remember { mutableStateOf(true) }
+    var satelliteMode by remember { mutableStateOf(false) }
 
-    // Initial center based on default area
-    var centerLat by remember { mutableDoubleStateOf(if (defaultArea == SearchArea.SAC) 38.5816 else 34.0522) }
-    var centerLon by remember { mutableDoubleStateOf(if (defaultArea == SearchArea.SAC) -121.4944 else -118.2437) }
-    var zoom by remember { mutableIntStateOf(11) }
+    val activeStores = remember(stores) { stores.filter { !it.store.archived } }
 
-    val pins = remember(stores, jobRows, filter, todayIso) {
-        val activeStores = stores.filter { !it.store.archived }
-        val filteredJobs = when (filter) {
-            MapFilter.TODAY -> jobRows.filter { it.job.date == todayIso && it.job.status in JobStatus.ACTIVE }
-            MapFilter.OVERDUE -> jobRows.filter { BusinessRules.isOverdue(it.job.date, it.job.status, todayLa) }
-            MapFilter.UPCOMING -> jobRows.filter { it.job.date >= todayIso && it.job.status in JobStatus.ACTIVE }
-            MapFilter.ALL_STORES -> jobRows.filter { it.job.status in JobStatus.ACTIVE }
+    val filteredJobs = remember(jobRows, filter, today, weekStart, weekEnd) {
+        val activeOnly = jobRows.filter { it.job.status in JobStatus.ACTIVE }
+        when (filter) {
+            MapDateFilter.TODAY -> activeOnly.filter { it.job.date == today.toString() }
+            MapDateFilter.OVERDUE -> activeOnly.filter { BusinessRules.isOverdue(it.job.date, it.job.status, today) }
+            MapDateFilter.WEEK -> activeOnly.filter {
+                val d = BusinessRules.parseIsoDate(it.job.date)
+                d != null && !d.isBefore(weekStart) && !d.isAfter(weekEnd)
+            }
+            MapDateFilter.ALL -> activeOnly
         }
-        val jobsByStore = filteredJobs.groupBy { it.job.storeId }
-        val targetStores = if (filter == MapFilter.ALL_STORES) {
-            activeStores
-        } else {
-            activeStores.filter { jobsByStore.containsKey(it.store.id) }
-        }
-        targetStores.map { swh ->
-            val sJobs = BusinessRules.sortJobsForDay(jobsByStore[swh.store.id].orEmpty())
-            StoreMapPin(
-                store = swh,
-                jobs = sJobs,
-                hasOverdue = sJobs.any { BusinessRules.isOverdue(it.job.date, it.job.status, todayLa) }
+    }
+
+    val jobsByStore = remember(filteredJobs) { filteredJobs.groupBy { it.job.storeId } }
+    val visibleStores = remember(activeStores, jobsByStore, filter) {
+        if (filter == MapDateFilter.ALL) activeStores
+        else activeStores.filter { jobsByStore.containsKey(it.store.id) }.ifEmpty { activeStores }
+    }
+
+    val defaultCenter = remember(defaultArea) {
+        if (defaultArea == SearchArea.SAC) LatLng(38.5816, -121.4944) else LatLng(34.0522, -118.2437)
+    }
+
+    val cameraPositionState = rememberCameraPositionState {
+        val first = visibleStores.firstOrNull()?.store
+        position = CameraPosition.fromLatLngZoom(
+            if (first != null) LatLng(first.lat, first.lon) else defaultCenter,
+            11.5f
+        )
+    }
+
+    // Smoothly fit camera to visible store stops when filter changes
+    LaunchedEffect(visibleStores, filter) {
+        if (visibleStores.size == 1) {
+            val s = visibleStores.first().store
+            cameraPositionState.animate(
+                CameraUpdateFactory.newLatLngZoom(LatLng(s.lat, s.lon), 13.5f)
             )
+        } else if (visibleStores.size > 1) {
+            val boundsBuilder = LatLngBounds.Builder()
+            visibleStores.forEach { boundsBuilder.include(LatLng(it.store.lat, it.store.lon)) }
+            runCatching {
+                cameraPositionState.animate(CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 120))
+            }
         }
+    }
+
+    val selectedStore = remember(visibleStores, selectedStoreId) {
+        visibleStores.find { it.store.id == selectedStoreId }
     }
 
     Scaffold(
@@ -163,19 +174,31 @@ fun MapScreen(
             TopAppBar(
                 title = { Text(lStr(R.string.map_title), style = MaterialTheme.typography.titleLarge) },
                 actions = {
-                    FilterChip(
-                        selected = listMode,
-                        onClick = { listMode = !listMode },
-                        label = { Text(if (listMode) lStr(R.string.map_canvas_view) else lStr(R.string.map_list_view)) },
-                        leadingIcon = {
+                    if (!listMode) {
+                        IconButton(onClick = { trafficEnabled = !trafficEnabled }) {
                             Icon(
-                                imageVector = if (listMode) Icons.Default.Map else Icons.Default.FormatListBulleted,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                                imageVector = Icons.Default.Traffic,
+                                contentDescription = lStr(R.string.map_traffic),
+                                tint = if (trafficEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        },
-                        modifier = Modifier.padding(end = 8.dp)
-                    )
+                        }
+                        IconButton(onClick = { satelliteMode = !satelliteMode }) {
+                            Icon(
+                                imageVector = Icons.Default.Layers,
+                                contentDescription = lStr(R.string.map_satellite),
+                                tint = if (satelliteMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    TextButton(onClick = { listMode = !listMode }) {
+                        Icon(
+                            imageVector = if (listMode) Icons.Default.Map else Icons.Default.FormatListBulleted,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (listMode) lStr(R.string.map_canvas_view) else lStr(R.string.map_list_view))
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
@@ -186,51 +209,33 @@ fun MapScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Filter chips + area quick jump
+            // Filter chips + Optimize Route button
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 FilterChip(
-                    selected = filter == MapFilter.TODAY,
-                    onClick = { filter = MapFilter.TODAY },
+                    selected = filter == MapDateFilter.TODAY,
+                    onClick = { filter = MapDateFilter.TODAY; viewModel.clearRoutePlan() },
                     label = { Text(lStr(R.string.today)) }
                 )
                 FilterChip(
-                    selected = filter == MapFilter.OVERDUE,
-                    onClick = { filter = MapFilter.OVERDUE },
+                    selected = filter == MapDateFilter.OVERDUE,
+                    onClick = { filter = MapDateFilter.OVERDUE; viewModel.clearRoutePlan() },
                     label = { Text(lStr(R.string.overdue)) }
                 )
                 FilterChip(
-                    selected = filter == MapFilter.UPCOMING,
-                    onClick = { filter = MapFilter.UPCOMING },
-                    label = { Text(lStr(R.string.upcoming)) }
+                    selected = filter == MapDateFilter.WEEK,
+                    onClick = { filter = MapDateFilter.WEEK; viewModel.clearRoutePlan() },
+                    label = { Text(lStr(R.string.this_week)) }
                 )
                 FilterChip(
-                    selected = filter == MapFilter.ALL_STORES,
-                    onClick = { filter = MapFilter.ALL_STORES },
-                    label = { Text(lStr(R.string.tab_stores)) }
-                )
-                FilterChip(
-                    selected = false,
-                    onClick = {
-                        centerLat = 34.0522
-                        centerLon = -118.2437
-                        zoom = 11
-                    },
-                    label = { Text(lStr(R.string.area_la)) }
-                )
-                FilterChip(
-                    selected = false,
-                    onClick = {
-                        centerLat = 38.5816
-                        centerLon = -121.4944
-                        zoom = 11
-                    },
-                    label = { Text(lStr(R.string.area_sac)) }
+                    selected = filter == MapDateFilter.ALL,
+                    onClick = { filter = MapDateFilter.ALL; viewModel.clearRoutePlan() },
+                    label = { Text(lStr(R.string.all)) }
                 )
             }
 
@@ -240,418 +245,298 @@ fun MapScreen(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (pins.isEmpty()) {
+                    if (visibleStores.isEmpty()) {
                         item {
                             Text(
-                                text = lStr(R.string.no_jobs_in_filter),
+                                text = lStr(R.string.no_stores_yet),
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 12.dp)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     } else {
-                        items(pins, key = { it.store.store.id }) { pin ->
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { selectedPin = pin },
-                                shape = RoundedCornerShape(14.dp),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                        items(visibleStores, key = { it.store.id }) { swh ->
+                            val jobsHere = jobsByStore[swh.store.id].orEmpty()
+                            StoreMapListCard(
+                                swh = swh,
+                                jobsHere = jobsHere,
+                                zoneId = zoneId,
+                                onOpenStore = { onOpenStore(swh.store.id) },
+                                onDirections = { launchDirections(context, swh.store.lat, swh.store.lon, swh.store.name) },
+                                onCall = { launchDialer(context, swh.store.phone) }
+                            )
+                        }
+                    }
+                }
+            } else {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    val isDark = isSystemInDarkTheme()
+                    GoogleMap(
+                        modifier = Modifier.fillMaxSize(),
+                        cameraPositionState = cameraPositionState,
+                        mapColorScheme = if (isDark) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT,
+                        properties = MapProperties(
+                            mapType = if (satelliteMode) MapType.HYBRID else MapType.NORMAL,
+                            isTrafficEnabled = trafficEnabled
+                        ),
+                        uiSettings = MapUiSettings(
+                            zoomControlsEnabled = true,
+                            compassEnabled = true,
+                            mapToolbarEnabled = true
+                        ),
+                        onMapClick = { selectedStoreId = null }
+                    ) {
+                        visibleStores.forEach { swh ->
+                            val jobsHere = jobsByStore[swh.store.id].orEmpty()
+                            val hasOverdue = jobsHere.any { BusinessRules.isOverdue(it.job.date, it.job.status, today) }
+                            val hue = when {
+                                hasOverdue -> BitmapDescriptorFactory.HUE_RED
+                                jobsHere.isNotEmpty() -> BitmapDescriptorFactory.HUE_AZURE
+                                else -> BitmapDescriptorFactory.HUE_GREEN
+                            }
+                            Marker(
+                                state = MarkerState(position = LatLng(swh.store.lat, swh.store.lon)),
+                                title = swh.store.name,
+                                snippet = if (jobsHere.isNotEmpty()) "${jobsHere.size} active stop(s)" else swh.store.address,
+                                icon = BitmapDescriptorFactory.defaultMarker(hue),
+                                onClick = {
+                                    selectedStoreId = swh.store.id
+                                    true
+                                }
+                            )
+                        }
+
+                        val routePts = routeState.route?.polylinePoints.orEmpty()
+                        if (routePts.size >= 2) {
+                            Polyline(
+                                points = routePts,
+                                color = Color(0xFF183A37),
+                                width = 12f
+                            )
+                        }
+                    }
+
+                    // Optimize Multi-Stop Route overlay via Google Routes API
+                    if (visibleStores.size >= 2) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                            shadowElevation = 4.dp,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (routeState.loading) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(
+                                        Icons.Default.Route,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                val r = routeState.route
+                                if (r != null) {
+                                    val mi = r.distanceMeters / 1609.34
+                                    val mins = r.durationSeconds / 60
+                                    Text(
+                                        text = "%.1f mi • %d min".format(mi, mins),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    IconButton(
+                                        onClick = { viewModel.clearRoutePlan() },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(Icons.Default.Close, contentDescription = lStr(R.string.clear), modifier = Modifier.size(16.dp))
+                                    }
+                                } else {
+                                    Text(
+                                        text = lStr(R.string.map_optimize_route),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.clickable {
+                                            val stops = visibleStores.map { LatLng(it.store.lat, it.store.lon) }
+                                            viewModel.optimizeRouteForStops(stops)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Selected Store Bottom Card
+                    if (selectedStore != null) {
+                        val jobsHere = jobsByStore[selectedStore.store.id].orEmpty()
+                        Card(
+                            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(14.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(pin.store.store.name, style = MaterialTheme.typography.titleMedium)
                                         Text(
-                                            pin.store.store.address,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            text = selectedStore.store.name,
+                                            style = MaterialTheme.typography.titleLarge,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
-                                        Spacer(Modifier.height(4.dp))
                                         Text(
-                                            lStr(R.string.map_jobs_at_store, pin.jobs.size),
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = if (pin.hasOverdue) TerracottaError else MaterialTheme.colorScheme.primary
+                                            text = selectedStore.store.address,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2
                                         )
                                     }
-                                    IconButton(
+                                    IconButton(onClick = { selectedStoreId = null }) {
+                                        Icon(Icons.Default.Close, contentDescription = lStr(R.string.close))
+                                    }
+                                }
+
+                                Text(
+                                    text = "${lStr(R.string.receiving_hours)}: ${todayHoursSummary(selectedStore.hours, zoneId)}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
                                         onClick = {
                                             launchDirections(
                                                 context,
-                                                pin.store.store.lat,
-                                                pin.store.store.lon,
-                                                pin.store.store.name
+                                                selectedStore.store.lat,
+                                                selectedStore.store.lon,
+                                                selectedStore.store.name
                                             )
-                                        }
+                                        },
+                                        modifier = Modifier.weight(1f)
                                     ) {
-                                        Icon(Icons.Default.Directions, contentDescription = lStr(R.string.directions))
+                                        Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(lStr(R.string.directions))
+                                    }
+                                    if (selectedStore.store.phone.isNotBlank()) {
+                                        OutlinedButton(
+                                            onClick = { launchDialer(context, selectedStore.store.phone) }
+                                        ) {
+                                            Icon(Icons.Default.Call, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(lStr(R.string.call_store))
+                                        }
+                                    }
+                                    OutlinedButton(onClick = { onOpenStore(selectedStore.store.id) }) {
+                                        Text(lStr(R.string.store_details))
+                                    }
+                                }
+
+                                if (jobsHere.isNotEmpty()) {
+                                    Text(
+                                        text = lStr(R.string.map_jobs_at_store, jobsHere.size),
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    jobsHere.take(2).forEach { row ->
+                                        JobCard(row = row, zoneId = zoneId, onClick = { onOpenJob(row.job.id) })
+                                    }
+                                } else if (RolePermissions.canManageStoresAndJobs(userRole)) {
+                                    OutlinedButton(
+                                        onClick = { onNewJobForStore(selectedStore.store.id) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(lStr(R.string.new_job))
                                     }
                                 }
                             }
                         }
                     }
                 }
-            } else {
-                OsmInteractiveMap(
-                    centerLat = centerLat,
-                    centerLon = centerLon,
-                    zoom = zoom,
-                    pins = pins,
-                    tileUrlTemplate = tileUrlTemplate,
-                    tileLoader = tileLoader,
-                    onPan = { newLat, newLon ->
-                        centerLat = newLat
-                        centerLon = newLon
-                    },
-                    onZoomChange = { newZoom -> zoom = newZoom.coerceIn(4, 18) },
-                    onPinTap = { pin -> selectedPin = pin },
-                    onClusterTap = { cluster ->
-                        val avgLat = cluster.pins.map { it.store.store.lat }.average()
-                        val avgLon = cluster.pins.map { it.store.store.lon }.average()
-                        centerLat = avgLat
-                        centerLon = avgLon
-                        zoom = (zoom + 2).coerceAtMost(18)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                )
-            }
-        }
-    }
-
-    selectedPin?.let { pin ->
-        ModalBottomSheet(onDismissRequest = { selectedPin = null }) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(pin.store.store.name, style = MaterialTheme.typography.titleLarge)
-                Text(
-                    pin.store.store.address,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    "${lStr(R.string.receiving_hours)}: ${todayHoursSummary(pin.store.hours)}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            launchDirections(context, pin.store.store.lat, pin.store.store.lon, pin.store.store.name)
-                        }
-                    ) {
-                        Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(lStr(R.string.directions))
-                    }
-                    if (pin.store.store.phone.isNotBlank()) {
-                        OutlinedButton(onClick = { launchDialer(context, pin.store.store.phone) }) {
-                            Icon(Icons.Default.Call, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(lStr(R.string.call_store))
-                        }
-                    }
-                    Button(
-                        onClick = {
-                            val id = pin.store.store.id
-                            selectedPin = null
-                            onOpenStore(id)
-                        }
-                    ) {
-                        Text(lStr(R.string.store_details))
-                    }
-                }
-
-                if (pin.jobs.isNotEmpty()) {
-                    Text(
-                        lStr(R.string.map_jobs_at_store, pin.jobs.size),
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    pin.jobs.take(5).forEach { row ->
-                        JobCard(
-                            row = row,
-                            onClick = {
-                                selectedPin = null
-                                onOpenJob(row.job.id)
-                            }
-                        )
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = {
-                            val id = pin.store.store.id
-                            selectedPin = null
-                            onNewJobForStore(id)
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text(lStr(R.string.new_job))
-                    }
-                }
-                Spacer(Modifier.height(18.dp))
             }
         }
     }
 }
 
 @Composable
-private fun OsmInteractiveMap(
-    centerLat: Double,
-    centerLon: Double,
-    zoom: Int,
-    pins: List<StoreMapPin>,
-    tileUrlTemplate: String,
-    tileLoader: OsmTileLoader,
-    onPan: (Double, Double) -> Unit,
-    onZoomChange: (Int) -> Unit,
-    onPinTap: (StoreMapPin) -> Unit,
-    onClusterTap: (MapCluster) -> Unit,
-    modifier: Modifier = Modifier
+private fun StoreMapListCard(
+    swh: StoreWithHours,
+    jobsHere: List<JobListRow>,
+    zoneId: ZoneId,
+    onOpenStore: () -> Unit,
+    onDirections: () -> Unit,
+    onCall: () -> Unit
 ) {
-    val tileSizePx = 256
-    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
-    val loadedTiles = remember { mutableStateMapOf<String, Bitmap>() }
-    var tileFailed by remember { mutableStateOf(false) }
-
-    val (centerTileX, centerTileY) = remember(centerLat, centerLon, zoom) {
-        OsmProjection.latLonToTileDouble(centerLat, centerLon, zoom)
-    }
-
-    val visibleRange = remember(centerTileX, centerTileY, zoom, canvasSize) {
-        if (canvasSize.width == 0 || canvasSize.height == 0) {
-            IntRange.EMPTY to IntRange.EMPTY
-        } else {
-            val halfTilesX = canvasSize.width / (2.0 * tileSizePx)
-            val halfTilesY = canvasSize.height / (2.0 * tileSizePx)
-            val minX = floor(centerTileX - halfTilesX).toInt()
-            val maxX = ceil(centerTileX + halfTilesX).toInt()
-            val minY = floor(centerTileY - halfTilesY).toInt()
-            val maxY = ceil(centerTileY + halfTilesY).toInt()
-            (minX..maxX) to (minY..maxY)
-        }
-    }
-
-    // Fetch visible OSM tiles asynchronously (cached 7 days on disk + LRU memory)
-    LaunchedEffect(visibleRange, zoom, tileUrlTemplate) {
-        val (xRange, yRange) = visibleRange
-        if (xRange.isEmpty() || yRange.isEmpty()) return@LaunchedEffect
-        var anyFailure = false
-        for (tx in xRange) {
-            for (ty in yRange) {
-                val key = "$zoom/$tx/$ty/$tileUrlTemplate"
-                if (!loadedTiles.containsKey(key)) {
-                    launch {
-                        val bmp = tileLoader.loadTile(zoom, tx, ty, tileUrlTemplate)
-                        if (bmp != null) {
-                            loadedTiles[key] = bmp
-                        } else {
-                            anyFailure = true
-                            if (loadedTiles.isEmpty()) tileFailed = true
-                        }
-                    }
-                }
-            }
-        }
-        if (loadedTiles.isNotEmpty() && !anyFailure) tileFailed = false
-    }
-
-    // Screen-space clustering (merge pins within 72px)
-    val clusters = remember(pins, centerTileX, centerTileY, zoom, canvasSize) {
-        if (canvasSize.width == 0 || canvasSize.height == 0) return@remember emptyList<MapCluster>()
-        val cx = canvasSize.width / 2f
-        val cy = canvasSize.height / 2f
-        val projected = pins.map { pin ->
-            val (px, py) = OsmProjection.latLonToTileDouble(pin.store.store.lat, pin.store.store.lon, zoom)
-            val sx = cx + ((px - centerTileX) * tileSizePx).toFloat()
-            val sy = cy + ((py - centerTileY) * tileSizePx).toFloat()
-            Triple(sx, sy, pin)
-        }
-        val used = BooleanArray(projected.size)
-        val out = mutableListOf<MapCluster>()
-        for (i in projected.indices) {
-            if (used[i]) continue
-            used[i] = true
-            val (sx, sy, firstPin) = projected[i]
-            val group = mutableListOf(firstPin)
-            var sumX = sx
-            var sumY = sy
-            for (j in i + 1 until projected.size) {
-                if (used[j]) continue
-                val (ox, oy, otherPin) = projected[j]
-                if (hypot((ox - sx).toDouble(), (oy - sy).toDouble()) < 72.0) {
-                    used[j] = true
-                    group += otherPin
-                    sumX += ox
-                    sumY += oy
-                }
-            }
-            out += MapCluster(sumX / group.size, sumY / group.size, group)
-        }
-        out
-    }
-
-    val textPaint = remember {
-        Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.WHITE
-            textAlign = Paint.Align.CENTER
-            textSize = 32f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-    }
-
-    Box(
-        modifier = modifier
-            .background(Color(0xFFE7ECE9))
-            .onSizeChanged { canvasSize = it }
-            .pointerInput(centerLat, centerLon, zoom) {
-                detectTransformGestures { _, pan, gestureZoom, _ ->
-                    val (curX, curY) = OsmProjection.latLonToTileDouble(centerLat, centerLon, zoom)
-                    val newX = curX - pan.x / tileSizePx.toDouble()
-                    val newY = curY - pan.y / tileSizePx.toDouble()
-                    val (nLat, nLon) = OsmProjection.tileDoubleToLatLon(newX, newY, zoom)
-                    onPan(nLat, nLon)
-                    if (gestureZoom > 1.25f) onZoomChange(zoom + 1)
-                    else if (gestureZoom < 0.8f) onZoomChange(zoom - 1)
-                }
-            }
-            .pointerInput(clusters) {
-                detectTapGestures { offset ->
-                    val hit = clusters.minByOrNull {
-                        hypot((it.screenX - offset.x).toDouble(), (it.screenY - offset.y).toDouble())
-                    }
-                    if (hit != null && hypot((hit.screenX - offset.x).toDouble(), (hit.screenY - offset.y).toDouble()) <= 56.0) {
-                        if (hit.pins.size == 1) onPinTap(hit.pins.first()) else onClusterTap(hit)
-                    }
-                }
-            }
+    val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
+    val hasOverdue = jobsHere.any { BusinessRules.isOverdue(it.job.date, it.job.status, today) }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpenStore),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val cx = size.width / 2f
-            val cy = size.height / 2f
-            val (xRange, yRange) = visibleRange
-            // Subtle offline grid backdrop
-            val gridStep = 128f
-            var gx = 0f
-            while (gx < size.width) {
-                drawLine(Color(0xFFD5DFDA), Offset(gx, 0f), Offset(gx, size.height), strokeWidth = 1f)
-                gx += gridStep
-            }
-            var gy = 0f
-            while (gy < size.height) {
-                drawLine(Color(0xFFD5DFDA), Offset(0f, gy), Offset(size.width, gy), strokeWidth = 1f)
-                gy += gridStep
-            }
-
-            // Draw tiles
-            for (tx in xRange) {
-                for (ty in yRange) {
-                    val key = "$zoom/$tx/$ty/$tileUrlTemplate"
-                    val bmp = loadedTiles[key]
-                    if (bmp != null) {
-                        val left = (cx + (tx - centerTileX) * tileSizePx).roundToInt()
-                        val top = (cy + (ty - centerTileY) * tileSizePx).roundToInt()
-                        drawImage(
-                            image = bmp.asImageBitmap(),
-                            dstOffset = IntOffset(left, top),
-                            dstSize = IntSize(tileSizePx + 1, tileSizePx + 1)
-                        )
-                    }
-                }
-            }
-
-            // Draw clustered markers
-            for (cluster in clusters) {
-                val center = Offset(cluster.screenX, cluster.screenY)
-                val isMulti = cluster.pins.size > 1
-                val hasOverdue = cluster.pins.any { it.hasOverdue }
-                val pinColor = when {
-                    hasOverdue -> TerracottaError
-                    isMulti -> AmberAccent
-                    else -> ForestPrimary
-                }
-                val radius = if (isMulti) 34f else 28f
-                drawCircle(color = Color.White, radius = radius + 4f, center = center)
-                drawCircle(color = pinColor, radius = radius, center = center)
-
-                val badgeText = if (isMulti) {
-                    cluster.pins.size.toString()
-                } else {
-                    val count = cluster.pins.first().jobs.size
-                    if (count > 0) count.toString() else "•"
-                }
-                drawIntoCanvas { canvas ->
-                    val textY = center.y - (textPaint.descent() + textPaint.ascent()) / 2f
-                    canvas.nativeCanvas.drawText(badgeText, center.x, textY, textPaint)
-                }
-            }
-        }
-
-        // Offline tile notice banner
-        if (tileFailed && loadedTiles.isEmpty()) {
-            Surface(
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(12.dp)
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = lStr(R.string.map_tiles_offline),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    swh.store.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-            }
-        }
-
-        // Zoom controls
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 12.dp, bottom = 36.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Surface(shape = CircleShape, shadowElevation = 3.dp, color = MaterialTheme.colorScheme.surface) {
-                IconButton(onClick = { onZoomChange(zoom + 1) }) {
-                    Icon(Icons.Default.Add, contentDescription = "Zoom in")
+                if (jobsHere.isNotEmpty()) {
+                    StatusTag(
+                        text = "${jobsHere.size}",
+                        bg = if (hasOverdue) TerracottaContainer else MaterialTheme.colorScheme.primaryContainer,
+                        fg = if (hasOverdue) TerracottaError else MaterialTheme.colorScheme.onPrimaryContainer
+                    )
                 }
             }
-            Surface(shape = CircleShape, shadowElevation = 3.dp, color = MaterialTheme.colorScheme.surface) {
-                IconButton(onClick = { onZoomChange(zoom - 1) }) {
-                    Icon(Icons.Default.Remove, contentDescription = "Zoom out")
-                }
-            }
-        }
-
-        // Required visible OpenStreetMap attribution
-        Surface(
-            color = Color.White.copy(alpha = 0.88f),
-            shape = RoundedCornerShape(6.dp),
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(8.dp)
-        ) {
             Text(
-                text = lStr(R.string.osm_attribution),
-                style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF1F2937),
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                swh.store.address,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Text(
+                "${lStr(R.string.receiving_hours)}: ${todayHoursSummary(swh.hours, zoneId)}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onDirections) {
+                    Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(lStr(R.string.directions))
+                }
+                if (swh.store.phone.isNotBlank()) {
+                    OutlinedButton(onClick = onCall) {
+                        Icon(Icons.Default.Call, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(lStr(R.string.call_store))
+                    }
+                }
+            }
         }
     }
 }

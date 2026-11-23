@@ -2,13 +2,12 @@
 <resources>
     <string name="app_name">DeliFar</string>
 
-    <!-- Bottom navigation -->
     <string name="tab_home">Գլխավոր</string>
     <string name="tab_map">Քարտեզ</string>
     <string name="tab_schedule">Ժամանակացույց</string>
+    <string name="tab_invoices">Հաշիվներ</string>
     <string name="tab_stores">Խանութներ</string>
 
-    <!-- Common -->
     <string name="settings">Կարգավորումներ</string>
     <string name="save">Պահպանել</string>
     <string name="cancel">Չեղարկել</string>
@@ -24,56 +23,93 @@
     <string name="overdue">Ժամկետանց</string>
     <string name="upcoming">Առաջիկա</string>
     <string name="this_week">Այս շաբաթ</string>
-    <string name="la_time_label">Լոս Անջելեսի ժամանակ</string>
+    <string name="company_time_label">Ընկերության ժամանակ</string>
 
-    <!-- Home -->
+    <string name="role_owner">Սեփականատեր</string>
+    <string name="role_manager">Մենեջեր</string>
+    <string name="role_driver">Վարորդ</string>
+    <string name="role_accountant">Հաշվապահ</string>
+
+    <string name="sync_synced">Համաժամեցված է</string>
+    <string name="sync_syncing">Համաժամեցում…</string>
+    <string name="sync_pending">Սպասում է վերբեռնման՝ %1$d</string>
+    <string name="sync_failed">Վերբեռնման սխալ (%1$d) — կրկնել</string>
+    <string name="sync_offline_mode">Օֆլայն ռեժիմ</string>
+    <string name="sync_now">Համաժամեցնել</string>
+    <string name="maps_quota_warning">Google Maps-ի օրական սահմանաչափը սպառվել է։ Որոշ հարցումներ սահմանափակված են։</string>
+    <string name="maps_quota_learn_more">Մանրամասներ</string>
+
+    <string name="account_and_company">Հաշիվ և ընկերություն</string>
+    <string name="sign_in">Մուտք գործել</string>
+    <string name="create_account">Ստեղծել հաշիվ</string>
+    <string name="sign_out">Ելք</string>
+    <string name="continue_offline">Շարունակել օֆլայն</string>
+    <string name="email_label">Էլ. փոստ</string>
+    <string name="password_label">Գաղտնաբառ</string>
+    <string name="full_name_label">Անուն Ազգանուն</string>
+    <string name="register_company">Գրանցել ընկերություն</string>
+    <string name="company_name_label">Ընկերության անվանումը</string>
+    <string name="company_timezone_label">Ժամային գոտի</string>
+    <string name="join_with_invite">Միանալ հրավերի կոդով</string>
+    <string name="invite_code_label">Հրավերի կոդ</string>
+    <string name="team_management">Թիմ և ընկերություն</string>
+    <string name="invite_employee">Հրավիրել աշխատակից</string>
+    <string name="employees_tab">Աշխատակիցներ</string>
+    <string name="invitations_tab">Հրավերներ</string>
+    <string name="activity_tab">Գործողությունների մատյան</string>
+    <string name="active_status">Ակտիվ</string>
+    <string name="deactivated_status">Ապաակտիվացված</string>
+    <string name="activate">Ակտիվացնել</string>
+    <string name="deactivate">Ապաակտիվացնել</string>
+    <string name="revoke">Չեղարկել</string>
+    <string name="migrate_local_data">Տեղափոխել տեղական տվյալները ամպ</string>
+    <string name="migrate_confirm_title">Հաստատել տվյալների տեղափոխումը</string>
+    <string name="migrate_confirm_body">Տեղափոխե՞լ %1$d խանութ, %2$d առաջադրանք և %3$d հաշիվ «%4$s» ընկերություն։ Կրկնօրինակներ չեն ստեղծվի։</string>
+
     <string name="home_title">DeliFar</string>
     <string name="home_today_jobs">Այսօրվա աշխատանք</string>
-    <string name="home_overdue_jobs">Ժամկետանց</string>
-    <string name="home_completed_today">Ավարտված</string>
-    <string name="home_no_work_today">Այսօրվա համար առաքումներ կամ վերցումներ չկան։</string>
-    <string name="home_add_first_store">Նախ ավելացրեք խանութ, ապա պլանավորեք առաքում կամ վերցում։</string>
-    <string name="new_job">Նոր առաքում / վերցում</string>
+    <string name="home_overdue_jobs">Ժամկետանց աշխատանք</string>
+    <string name="home_completed_today">Ավարտված այսօր</string>
+    <string name="home_no_work_today">Այսօրվա համար առաքումներ կամ վերցնումներ չկան։</string>
+    <string name="home_add_first_store">Նախ ավելացրեք խանութ, ապա պլանավորեք առաջին առաքումը կամ վերցնումը։</string>
+    <string name="new_job">Նոր առաքում / վերցնում</string>
     <string name="draft_banner_title">Չպահպանված սևագիր</string>
     <string name="draft_resume">Շարունակել</string>
     <string name="draft_discard">Ջնջել</string>
     <string name="lines_count">%1$d տող</string>
     <string name="line_singular">1 տող</string>
-    <string name="untimed">Առանց ժամի</string>
+    <string name="untimed">Ցանկացած ժամի</string>
 
-    <!-- Job types & statuses -->
     <string name="type_delivery">Առաքում</string>
-    <string name="type_pickup">Վերցում</string>
-    <string name="status_pending">Սպասման մեջ</string>
+    <string name="type_pickup">Վերցնում</string>
+    <string name="status_pending">Սպասում է</string>
     <string name="status_progress">Ընթացքում</string>
     <string name="status_completed">Ավարտված</string>
     <string name="status_canceled">Չեղարկված</string>
 
-    <!-- Issues -->
     <string name="issue_partial">Մասնակի</string>
     <string name="issue_closed">Խանութը փակ է</string>
     <string name="issue_refused">Մերժված</string>
+    <string name="issue_unavailable">Ստացողը հասանելի չէ</string>
+    <string name="issue_damaged">Վնասված ապրանք</string>
+    <string name="issue_unsigned">Չստորագրված հաշիվ</string>
     <string name="issue_other">Այլ խնդիր</string>
 
-    <!-- Stores -->
     <string name="stores_title">Խանութներ</string>
     <string name="add_store">Ավելացնել խանութ</string>
     <string name="edit_store">Խմբագրել խանութը</string>
     <string name="store_details">Խանութի տվյալներ</string>
     <string name="active_stores">Ակտիվ</string>
-    <string name="archived_stores">Արխիվ</string>
-    <string name="no_stores_yet">Պահպանված խանութներ դեռ չկան։</string>
+    <string name="archived_stores">Արխիվացված</string>
+    <string name="no_stores_yet">Պահպանված խանութներ չկան։</string>
     <string name="search_stores_hint">Ֆիլտրել խանութները…</string>
     <string name="area_la">Լոս Անջելես</string>
     <string name="area_sac">Սակրամենտո</string>
-    <string name="photon_search_hint">Խանութի անունը կամ հասցեն</string>
-    <string name="photon_search_button">Որոնել OSM</string>
-    <string name="photon_searching">Որոնում OpenStreetMap-ում…</string>
-    <string name="photon_no_results">Այս տարածքում արդյունքներ չգտնվեցին։</string>
-    <string name="photon_attribution">Որոնում Photon • © OpenStreetMap մասնակիցներ (ODbL)</string>
-    <string name="osm_attribution">© OpenStreetMap մասնակիցներ</string>
-    <string name="manual_entry">Ձեռքով մուտք</string>
-    <string name="duplicate_store_warning">Այս OpenStreetMap վայրով խանութն արդեն պահպանված է։</string>
+    <string name="places_search_hint">Որոնել խանութ կամ հասցե Google-ում</string>
+    <string name="places_searching">Որոնում Google Places-ում…</string>
+    <string name="places_no_results">Այս տարածքում արդյունք չի գտնվել։</string>
+    <string name="places_attribution">Powered by Google</string>
+    <string name="duplicate_store_warning">Այս Google Place-ով խանութն արդեն պահպանված է։</string>
     <string name="store_name">Խանութի անվանում</string>
     <string name="store_address">Ամբողջական հասցե</string>
     <string name="store_phone">Հեռախոս (ըստ ցանկության)</string>
@@ -81,85 +117,130 @@
     <string name="hours_unknown">Անհայտ</string>
     <string name="hours_closed">Փակ է</string>
     <string name="hours_open">Բաց է</string>
-    <string name="hours_windows_hint">օր.՝ 08:00-12:00;13:00-17:00</string>
+    <string name="hours_windows_hint">օր. 08:00-12:00;13:00-17:00</string>
     <string name="archive_store">Արխիվացնել</string>
     <string name="restore_store">Վերականգնել</string>
     <string name="archive_blocked_active_jobs">Արխիվացնելուց առաջ ավարտեք կամ չեղարկեք ակտիվ առաջադրանքները։</string>
-    <string name="directions">Երթուղի</string>
+    <string name="directions">Google Քարտեզ</string>
     <string name="call_store">Զանգահարել</string>
 
-    <!-- Weekdays -->
     <string name="day_mon">Երկ</string>
     <string name="day_tue">Երք</string>
-    <string name="day_wed">Չոր</string>
+    <string name="day_wed">Չրք</string>
     <string name="day_thu">Հնգ</string>
     <string name="day_fri">Ուրբ</string>
     <string name="day_sat">Շբթ</string>
     <string name="day_sun">Կիր</string>
 
-    <!-- Job editor & detail -->
     <string name="edit_job">Խմբագրել առաջադրանքը</string>
     <string name="job_details">Առաջադրանքի մանրամասներ</string>
     <string name="select_store">Ընտրել խանութ</string>
-    <string name="date_label">Ամսաթիվ (LA)</string>
-    <string name="time_label">Ժամ (ըստ ցանկության, ԺԺ:րր)</string>
-    <string name="product_lines">Ապրանքներ</string>
-    <string name="add_product_line">Ավելացնել ապրանք</string>
+    <string name="assign_driver">Նշանակել վարորդ</string>
+    <string name="unassigned_driver">Նշանակված չէ</string>
+    <string name="job_notes_label">Նշումներ (ըստ ցանկության)</string>
+    <string name="date_label">Ամսաթիվ</string>
+    <string name="time_label">Ժամ (ըստ ցանկության, ԺԺ:ՐՐ)</string>
+    <string name="product_lines">Ապրանքների տողեր</string>
+    <string name="add_product_line">Ավելացնել տող</string>
     <string name="product_name">Ապրանք</string>
     <string name="planned_qty">Պլան</string>
     <string name="actual_qty">Փաստացի</string>
     <string name="unit_label">Միավոր</string>
-    <string name="hours_warning_closed">Զգուշացում․ այս օրը խանութի ընդունումը փակ է։</string>
-    <string name="hours_warning_unknown">Նշում․ այս օրվա ընդունման ժամերը հայտնի չեն։</string>
+    <string name="hours_warning_closed">Զգուշացում․ այդ օրը ընդունումը փակ է։</string>
+    <string name="hours_warning_unknown">Նշում․ ընդունման ժամերը նշված չեն։</string>
     <string name="hours_warning_outside">Զգուշացում․ ընտրված ժամը ընդունման ժամերից դուրս է։</string>
     <string name="action_start">Սկսել</string>
     <string name="action_complete">Ավարտել</string>
     <string name="action_reopen">Վերաբացել</string>
     <string name="action_reschedule">Տեղափոխել</string>
     <string name="action_cancel_job">Չեղարկել</string>
-    <string name="action_report_issue">Խնդիր</string>
-    <string name="job_reminder_switch">Առաջադրանքի հիշեցում</string>
+    <string name="action_report_issue">Նշել խնդիր</string>
+    <string name="job_reminder_switch">Ժամային հիշեցում</string>
     <string name="keep_work_open">Պահել առաջադրանքը բաց</string>
-    <string name="issue_note_label">Մեկնաբանություն (ըստ ցանկության)</string>
+    <string name="issue_note_label">Խնդրի նշում (ըստ ցանկության)</string>
 
-    <!-- Map -->
+    <string name="invoices_title">Հաշիվ-ապրանքագրեր</string>
+    <string name="add_invoice">Ավելացնել հաշիվ</string>
+    <string name="capture_photo">Լուսանկարել</string>
+    <string name="pick_gallery">Պատկերասրահից</string>
+    <string name="import_pdf">Ներմուծել PDF</string>
+    <string name="invoice_number_label">Հաշվի համար</string>
+    <string name="invoice_notes_label">Նշումներ (ըստ ցանկության)</string>
+    <string name="rotate_90">Պտտել 90°</string>
+    <string name="enhance_contrast">Կոնտրաստ</string>
+    <string name="crop_edges">Կտրել</string>
+    <string name="retake">Կրկին նկարել</string>
+    <string name="save_invoice">Պահպանել հաշիվը</string>
+    <string name="save_and_sign">Պահպանել և ստորագրել</string>
+    <string name="collect_signature">Ստանալ ստորագրություն</string>
+    <string name="signature_title">Հաշվի էլեկտրոնային ստորագրում</string>
+    <string name="recipient_name_label">Ստացողի անուն ազգանուն</string>
+    <string name="recipient_title_label">Պաշտոն (ըստ ցանկության)</string>
+    <string name="delivery_ack_label">Հաստատում եմ առաքման ստացումը այս հաշվով։</string>
+    <string name="signature_pad_hint">Ստորագրեք մատով կամ գրիչով</string>
+    <string name="signature_position_hint">Հպեք կամ քաշեք փաստաթղթի վրա՝ ստորագրության դիրքը ընտրելու համար</string>
+    <string name="signature_undo">Ետ</string>
+    <string name="signature_redo">Կրկնել</string>
+    <string name="signature_confirm_title">Հաստատել ստորագրված հաշիվը</string>
+    <string name="signature_confirm_body">Պահպանելուց հետո ստորագրված հաշիվը անփոփոխ է դառնում և ստեղծվում է PDF։ Ուղղումները ստեղծվում են որպես նոր տարբերակ։</string>
+    <string name="signature_disclaimer">Բջջային սարքով ստացված ձեռագիր ստացական — հավաստագրված գաղտնագրային թվային ստորագրություն չէ։</string>
+    <string name="invoice_status_not_signed">Չստորագրված</string>
+    <string name="invoice_status_signed">Ստորագրված</string>
+    <string name="invoice_status_pending_upload">Սպասում է վերբեռնման</string>
+    <string name="invoice_status_synchronized">Համաժամեցված</string>
+    <string name="invoice_status_upload_failed">Վերբեռնման սխալ</string>
+    <string name="invoice_status_voided">Անվավեր</string>
+    <string name="search_invoices_hint">Որոնել հաշվի # կամ խանութ…</string>
+    <string name="no_invoices_yet">Հաշիվներ չեն գտնվել։</string>
+    <string name="view_signed_pdf">Բացել PDF</string>
+    <string name="view_original_photo">Բնօրինակ</string>
+    <string name="print_pdf">Տպել PDF</string>
+    <string name="share_pdf">Կիսվել</string>
+    <string name="export_invoices_csv">Արտահանել CSV</string>
+    <string name="void_invoice">Անվավեր դարձնել</string>
+    <string name="new_corrected_version">Նոր տարբերակ</string>
+
     <string name="map_title">Երթուղու քարտեզ</string>
-    <string name="map_list_view">Ցուցակ</string>
+    <string name="map_list_view">Ցանկ</string>
     <string name="map_canvas_view">Քարտեզ</string>
-    <string name="map_tiles_offline">Քարտեզի շերտերը անհասանելի են՝ ցուցադրվում են նշիչները և ցուցակը։</string>
+    <string name="map_optimize_route">Օպտիմալացնել երթուղին</string>
+    <string name="map_traffic">Երթևեկություն</string>
+    <string name="map_satellite">Արբանյակ</string>
     <string name="map_jobs_at_store">Առաջադրանքներ խանութում՝ %1$d</string>
 
-    <!-- Schedule -->
     <string name="schedule_title">Ժամանակացույց</string>
     <string name="no_jobs_in_filter">Ընտրված ժամանակահատվածում առաջադրանքներ չկան։</string>
 
-    <!-- Settings & Backup -->
     <string name="settings_language">Լեզու</string>
     <string name="lang_system">Սարքի լեզու</string>
     <string name="lang_en">English</string>
     <string name="lang_ru">Русский</string>
     <string name="lang_hy">Հայերեն</string>
     <string name="settings_default_area">Որոնման հիմնական տարածք</string>
-    <string name="settings_reminders">Հիշեցումներ (LA ժամանակ)</string>
+    <string name="settings_reminders">Հիշեցումներ և ծանուցումներ</string>
     <string name="settings_notifications_permission">Ծանուցումների թույլտվություն</string>
     <string name="permission_granted">Թույլատրված է</string>
-    <string name="permission_request">Թույլատրել ծանուցումները</string>
+    <string name="permission_request">Թույլատրել</string>
     <string name="settings_daily_summary">Օրական ամփոփում</string>
-    <string name="settings_summary_time">Ամփոփման ժամ (ԺԺ:րր)</string>
-    <string name="settings_job_reminders">Ժամով առաջադրանքների հիշեցում</string>
-    <string name="settings_advance_minutes">Քանի րոպե առաջ</string>
-    <string name="settings_map_services">Քարտեզի և որոնման ծառայություններ</string>
-    <string name="settings_search_url">Photon որոնման HTTPS URL</string>
-    <string name="settings_tile_url">Քարտեզի HTTPS URL</string>
-    <string name="settings_reset_defaults">Վերականգնել լռելյայնը</string>
+    <string name="settings_summary_time">Ամփոփման ժամ (ԺԺ:ՐՐ)</string>
+    <string name="settings_job_reminders">Առաջադրանքի հիշեցումներ</string>
+    <string name="settings_advance_minutes">Րոպե առաջ</string>
+    <string name="notif_new_assignment">Նոր առաքման նշանակում</string>
+    <string name="notif_upcoming">Առաջիկա առաքման հիշեցում</string>
+    <string name="notif_changed_assignment">Փոփոխված նշանակում</string>
+    <string name="notif_completed">Ավարտված առաքում</string>
+    <string name="notif_signed_invoice">Ստորագրված հաշիվ</string>
+    <string name="notif_missing_signature">Բացակայող ստորագրություն</string>
+    <string name="notif_failed_upload">Վերբեռնման սխալ</string>
+    <string name="notif_employee_invite">Աշխատակցի հրավեր</string>
     <string name="settings_backup">Տվյալների պահուստավորում</string>
     <string name="export_json">Արտահանել JSON</string>
     <string name="import_json">Ներմուծել JSON</string>
-    <string name="backup_warning">JSON պահուստները գաղտնագրված չեն և պարունակում են աշխատանքային տվյալներ։</string>
+    <string name="backup_warning">JSON պահուստային ֆայլերը գաղտնագրված չեն։ Պահեք անվտանգ տեղում։</string>
     <string name="import_preview_title">Ներմուծման նախադիտում</string>
-    <string name="import_replace_conflicts">Փոխարինել հակասող գրառումները</string>
+    <string name="import_replace_conflicts">Փոխարինել համընկնող գրառումները</string>
     <string name="import_restore_prefs">Վերականգնել կարգավորումները</string>
     <string name="import_apply">Կիրառել միավորումը</string>
-    <string name="settings_about">DeliFar-ի մասին</string>
-    <string name="about_text">Անցանց առաքման և վերցման կազմակերպիչ։ Քարտեզներ և որոնում © OpenStreetMap մասնակիցներ (ODbL)։</string>
+    <string name="settings_about">DeliFar 2.0-ի մասին</string>
+    <string name="about_text">Ամպային բազմաօգտատեր առաքումների և հաշիվների ստորագրման հարթակ՝ Google Firebase և Google Maps Platform տեխնոլոգիաներով։</string>
 </resources>

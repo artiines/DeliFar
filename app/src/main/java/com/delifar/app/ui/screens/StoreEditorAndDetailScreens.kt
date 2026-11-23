@@ -66,6 +66,7 @@ import com.delifar.app.data.SearchArea
 import com.delifar.app.data.StoreHoursEntity
 import com.delifar.app.data.StoreWithHours
 import com.delifar.app.domain.BusinessRules
+import com.delifar.app.domain.RolePermissions
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.JobCard
 import com.delifar.app.ui.components.lStr
@@ -153,7 +154,7 @@ fun StoreEditorScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Photon OpenStreetMap Search section
+            // Google Places API (New) Search Section
             item {
                 Card(
                     shape = RoundedCornerShape(14.dp),
@@ -196,12 +197,12 @@ fun StoreEditorScreen(
                             OutlinedTextField(
                                 value = searchQuery,
                                 onValueChange = { searchQuery = it },
-                                label = { Text(lStr(R.string.photon_search_hint)) },
+                                label = { Text(lStr(R.string.places_search_hint)) },
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
                             Button(
-                                onClick = { viewModel.searchPhoton(searchQuery, area) },
+                                onClick = { viewModel.searchPlaces(searchQuery, area) },
                                 enabled = !searchState.loading && searchQuery.trim().length >= 2
                             ) {
                                 Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -211,7 +212,7 @@ fun StoreEditorScreen(
                         if (searchState.loading) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                Text(lStr(R.string.photon_searching), style = MaterialTheme.typography.bodyMedium)
+                                Text(lStr(R.string.places_searching), style = MaterialTheme.typography.bodyMedium)
                             }
                         }
 
@@ -221,7 +222,7 @@ fun StoreEditorScreen(
 
                         if (searchState.searched && !searchState.loading && searchState.results.isEmpty() && searchState.error == null) {
                             Text(
-                                lStr(R.string.photon_no_results),
+                                lStr(R.string.places_no_results),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -238,7 +239,10 @@ fun StoreEditorScreen(
                                         address = place.address
                                         lat = place.lat
                                         lon = place.lon
-                                        providerId = place.providerId
+                                        if (place.phone.isNotBlank() && phone.isBlank()) {
+                                            phone = place.phone
+                                        }
+                                        providerId = place.placeId
                                         errorMsg = null
                                         viewModel.clearSearchState()
                                     }
@@ -267,7 +271,7 @@ fun StoreEditorScreen(
                         }
 
                         Text(
-                            text = lStr(R.string.photon_attribution),
+                            text = lStr(R.string.places_attribution),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -275,7 +279,6 @@ fun StoreEditorScreen(
                 }
             }
 
-            // Store Fields
             item {
                 OutlinedTextField(
                     value = name,
@@ -303,7 +306,6 @@ fun StoreEditorScreen(
                 )
             }
 
-            // Receiving hours per weekday
             item {
                 Text(
                     text = lStr(R.string.receiving_hours),
@@ -451,6 +453,9 @@ fun StoreDetailScreen(
     onOpenJob: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val prefs by viewModel.preferences.collectAsState()
+    val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
+    val canManage = RolePermissions.canManageStoresAndJobs(prefs.activeUserRole)
     val storeWithHours: StoreWithHours? by viewModel.observeStore(storeId).collectAsState(initial = null)
     val storeJobs = remember(allJobRows, storeId) {
         BusinessRules.sortJobsForDay(allJobRows.filter { it.job.storeId == storeId })
@@ -467,7 +472,7 @@ fun StoreDetailScreen(
                     }
                 },
                 actions = {
-                    if (storeWithHours != null) {
+                    if (storeWithHours != null && canManage) {
                         IconButton(onClick = { onEditStore(storeId) }) {
                             Icon(Icons.Default.Edit, contentDescription = lStr(R.string.edit))
                         }
@@ -544,31 +549,33 @@ fun StoreDetailScreen(
                             }
                         }
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (!swh.store.archived) {
-                                Button(
-                                    onClick = { onNewJobForStore(swh.store.id) },
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(lStr(R.string.new_job))
-                                }
-                                OutlinedButton(
-                                    onClick = { viewModel.archiveStore(swh.store.id, archiveBlockedMsg) }
-                                ) {
-                                    Icon(Icons.Default.Archive, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(lStr(R.string.archive_store))
-                                }
-                            } else {
-                                Button(
-                                    onClick = { viewModel.restoreStore(swh.store.id) },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Icon(Icons.Default.Unarchive, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(lStr(R.string.restore_store))
+                        if (canManage) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (!swh.store.archived) {
+                                    Button(
+                                        onClick = { onNewJobForStore(swh.store.id) },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(lStr(R.string.new_job))
+                                    }
+                                    OutlinedButton(
+                                        onClick = { viewModel.archiveStore(swh.store.id, archiveBlockedMsg) }
+                                    ) {
+                                        Icon(Icons.Default.Archive, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(lStr(R.string.archive_store))
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = { viewModel.restoreStore(swh.store.id) },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Default.Unarchive, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(lStr(R.string.restore_store))
+                                    }
                                 }
                             }
                         }
@@ -576,7 +583,6 @@ fun StoreDetailScreen(
                 }
             }
 
-            // Weekly Receiving Hours
             item {
                 Card(
                     shape = RoundedCornerShape(14.dp),
@@ -608,7 +614,6 @@ fun StoreDetailScreen(
                 }
             }
 
-            // Jobs at store
             item {
                 Text(
                     text = lStr(R.string.map_jobs_at_store, storeJobs.size),
@@ -616,7 +621,7 @@ fun StoreDetailScreen(
                 )
             }
             items(storeJobs, key = { it.job.id }) { row ->
-                JobCard(row = row, onClick = { onOpenJob(row.job.id) })
+                JobCard(row = row, zoneId = zoneId, onClick = { onOpenJob(row.job.id) })
             }
         }
     }

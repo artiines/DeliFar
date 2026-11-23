@@ -14,7 +14,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.delifar.app.MainActivity
-import com.delifar.app.R
 import com.delifar.app.data.DeliFarDatabase
 import com.delifar.app.data.DeliFarRepository
 import com.delifar.app.data.JobStatus
@@ -29,6 +28,7 @@ import java.time.ZonedDateTime
 
 object ReminderScheduler {
     const val CHANNEL_ID = "delifar_reminders"
+    const val CLOUD_CHANNEL_ID = "delifar_cloud_alerts"
     const val ACTION_ALARM_FIRE = "com.delifar.app.ACTION_REMINDER_ALARM"
     private const val ALARM_REQUEST_CODE = 42001
 
@@ -42,8 +42,7 @@ object ReminderScheduler {
 
     fun ensureChannel(context: Context) {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val existing = manager.getNotificationChannel(CHANNEL_ID)
-        if (existing == null) {
+        if (manager.getNotificationChannel(CHANNEL_ID) == null) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "DeliFar Reminders",
@@ -53,6 +52,16 @@ object ReminderScheduler {
             }
             manager.createNotificationChannel(channel)
         }
+        if (manager.getNotificationChannel(CLOUD_CHANNEL_ID) == null) {
+            val cloudChannel = NotificationChannel(
+                CLOUD_CHANNEL_ID,
+                "DeliFar Team & Invoice Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Driver assignments, signed invoices, upload status, and team invitations"
+            }
+            manager.createNotificationChannel(cloudChannel)
+        }
     }
 
     suspend fun rebuildAndDispatchIfDue(context: Context) {
@@ -60,9 +69,10 @@ object ReminderScheduler {
         val db = DeliFarDatabase.getInstance(context)
         val repo = DeliFarRepository(db)
         val prefs = repo.getPreferences()
+        val zone = BusinessRules.resolveZone(prefs.companyTimezone)
         val activeJobs = db.jobDao().getActiveJobs()
         val nowInstant = Instant.now()
-        val nowLa = BusinessRules.nowLa()
+        val nowZone = BusinessRules.nowInZone(zone)
 
         val futureCandidates = mutableListOf<CandidateAlert>()
 
@@ -70,10 +80,10 @@ object ReminderScheduler {
         if (prefs.daily) {
             val summaryTime = LocalTime.of(prefs.summaryMinute / 60, prefs.summaryMinute % 60)
             for (dayOffset in 0L..1L) {
-                val targetDate = nowLa.toLocalDate().plusDays(dayOffset)
-                val targetZdt = ZonedDateTime.of(targetDate, summaryTime, BusinessRules.LA_ZONE)
+                val targetDate = nowZone.toLocalDate().plusDays(dayOffset)
+                val targetZdt = ZonedDateTime.of(targetDate, summaryTime, zone)
                 val triggerInstant = targetZdt.toInstant()
-                val receiptKey = "summary:$targetDate:${prefs.summaryMinute}"
+                val receiptKey = "summary:$targetDate:${prefs.summaryMinute}:${zone.id}"
                 if (repo.hasReceipt(receiptKey)) continue
 
                 val jobsForDay = activeJobs.count { it.date == targetDate.toString() }
@@ -93,9 +103,8 @@ object ReminderScheduler {
                 )
                 val delayMs = Duration.between(triggerInstant, nowInstant).toMillis()
                 if (delayMs >= 0L) {
-                    // Delayed beyond 6 hours -> skip
                     if (delayMs <= 6L * 60 * 60 * 1000) {
-                        postNotification(context, candidate)
+                        postNotification(context, candidate.title, candidate.body, candidate.notificationId, CHANNEL_ID)
                         repo.recordReceipt(candidate.receiptKey)
                     }
                 } else {
@@ -105,13 +114,12 @@ object ReminderScheduler {
         }
 
         // 2. Timed job reminders
-        if (prefs.jobReminders) {
+        if (prefs.jobReminders && prefs.notifUpcoming) {
             val advanceMs = prefs.advance.toLong() * 60_000L
             for (job in activeJobs) {
                 if (job.status !in JobStatus.ACTIVE || !job.reminderEnabled) continue
                 val timeStr = job.time ?: continue
-                val jobInstant = BusinessRules.jobInstantLa(job.date, timeStr) ?: continue
-                // Expired job alerts are never replayed
+                val jobInstant = BusinessRules.jobInstant(job.date, timeStr, zone) ?: continue
                 if (!jobInstant.isAfter(nowInstant)) continue
 
                 val receiptKey = "job:${job.id}:${job.reminderVersion}"
@@ -126,8 +134,7 @@ object ReminderScheduler {
                     notificationId = job.id.hashCode()
                 )
                 if (!triggerInstant.isAfter(nowInstant)) {
-                    // Future job already inside reminder window -> one immediate eligible alert
-                    postNotification(context, candidate)
+                    postNotification(context, candidate.title, candidate.body, candidate.notificationId, CHANNEL_ID)
                     repo.recordReceipt(candidate.receiptKey)
                 } else {
                     futureCandidates += candidate
@@ -135,7 +142,6 @@ object ReminderScheduler {
             }
         }
 
-        // Schedule single next AlarmManager.setAndAllowWhileIdle alarm
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, ReminderReceiver::class.java).apply { action = ACTION_ALARM_FIRE }
         val pi = PendingIntent.getBroadcast(
@@ -157,7 +163,14 @@ object ReminderScheduler {
         }
     }
 
-    private fun postNotification(context: Context, alert: CandidateAlert) {
+    fun postNotification(
+        context: Context,
+        title: String,
+        body: String,
+        notificationId: Int,
+        channelId: String = CLOUD_CHANNEL_ID
+    ) {
+        ensureChannel(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
                 context,
@@ -170,22 +183,22 @@ object ReminderScheduler {
         }
         val contentPi = PendingIntent.getActivity(
             context,
-            alert.notificationId,
+            notificationId,
             launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(alert.title)
-            .setContentText(alert.body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(alert.body))
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
             .setContentIntent(contentPi)
             .build()
 
         runCatching {
-            NotificationManagerCompat.from(context).notify(alert.notificationId, notification)
+            NotificationManagerCompat.from(context).notify(notificationId, notification)
         }
     }
 }

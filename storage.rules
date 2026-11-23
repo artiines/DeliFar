@@ -1,0 +1,60 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function employeeDoc(companyId) {
+      return firestore.get(/databases/(default)/documents/companies/$(companyId)/employees/$(request.auth.uid));
+    }
+
+    function isActiveMember(companyId) {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/companies/$(companyId)/employees/$(request.auth.uid))
+        && employeeDoc(companyId).data.active == true
+        && employeeDoc(companyId).data.companyId == companyId;
+    }
+
+    function canUploadInvoiceFiles(companyId) {
+      return isActiveMember(companyId)
+        && employeeDoc(companyId).data.role in ['owner', 'manager', 'driver'];
+    }
+
+    function validInvoiceContentType() {
+      return request.resource.contentType.matches('image/jpeg|image/png|application/pdf');
+    }
+
+    function withinSizeLimit() {
+      // 15 MB per file ceiling
+      return request.resource.size > 0 && request.resource.size <= 15 * 1024 * 1024;
+    }
+
+    // Private company invoice storage: originals, edited pages, signature PNGs, signed PDFs
+    match /companies/{companyId}/invoices/{invoiceId}/{fileName} {
+      // Any active company member (Owner, Manager, Driver, Accountant) may read company invoices
+      allow read: if isActiveMember(companyId);
+
+      // Write-once immutability for signed PDFs and original captures; uploads restricted by role, MIME, size
+      allow create: if canUploadInvoiceFiles(companyId)
+        && withinSizeLimit()
+        && validInvoiceContentType()
+        && fileName.size() <= 160;
+
+      // Signed PDFs and untouched original photographs cannot be overwritten or deleted
+      allow update: if canUploadInvoiceFiles(companyId)
+        && !fileName.matches('^signed_.*\\.pdf$')
+        && !fileName.matches('^orig_.*')
+        && withinSizeLimit()
+        && validInvoiceContentType();
+
+      allow delete: if false;
+    }
+
+    // Default-deny catch-all
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

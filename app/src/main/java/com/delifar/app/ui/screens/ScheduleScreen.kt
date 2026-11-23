@@ -52,6 +52,7 @@ import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.weekdayShortLabel
 import com.delifar.app.ui.theme.TerracottaError
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -62,11 +63,13 @@ enum class ScheduleMode { DAY, WEEK, OVERDUE, ALL }
 fun ScheduleScreen(
     jobRows: List<JobListRow>,
     hasActiveStores: Boolean,
+    zoneId: ZoneId,
+    canManage: Boolean,
     onOpenJob: (String) -> Unit,
     onNewJob: () -> Unit
 ) {
-    val todayLa = remember { BusinessRules.todayLa() }
-    var selectedDate by remember { mutableStateOf(todayLa) }
+    val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
+    var selectedDate by remember(zoneId) { mutableStateOf(today) }
     var mode by remember { mutableStateOf(ScheduleMode.WEEK) }
 
     val weekDays = remember(selectedDate) { BusinessRules.weekDays(selectedDate) }
@@ -77,14 +80,14 @@ fun ScheduleScreen(
         jobRows.filter { it.job.status in JobStatus.ACTIVE }.groupingBy { it.job.date }.eachCount()
     }
 
-    val displayedJobs = remember(jobRows, mode, selectedDate, weekStart, weekEnd, todayLa) {
+    val displayedJobs = remember(jobRows, mode, selectedDate, weekStart, weekEnd, today) {
         val filtered = when (mode) {
             ScheduleMode.DAY -> jobRows.filter { it.job.date == selectedDate.toString() }
             ScheduleMode.WEEK -> jobRows.filter {
                 val d = BusinessRules.parseIsoDate(it.job.date)
                 d != null && !d.isBefore(weekStart) && !d.isAfter(weekEnd)
             }
-            ScheduleMode.OVERDUE -> jobRows.filter { BusinessRules.isOverdue(it.job.date, it.job.status, todayLa) }
+            ScheduleMode.OVERDUE -> jobRows.filter { BusinessRules.isOverdue(it.job.date, it.job.status, today) }
             ScheduleMode.ALL -> jobRows
         }
         BusinessRules.sortJobsForDay(filtered)
@@ -101,7 +104,7 @@ fun ScheduleScreen(
                     Column {
                         Text(lStr(R.string.schedule_title), style = MaterialTheme.typography.titleLarge)
                         Text(
-                            "${weekStart.format(monthFmt)} – ${weekEnd.format(monthFmt)} • ${lStr(R.string.la_time_label)}",
+                            "${weekStart.format(monthFmt)} – ${weekEnd.format(monthFmt)} • ${zoneId.id}",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -111,7 +114,7 @@ fun ScheduleScreen(
             )
         },
         floatingActionButton = {
-            if (hasActiveStores) {
+            if (hasActiveStores && canManage) {
                 FloatingActionButton(
                     onClick = onNewJob,
                     containerColor = MaterialTheme.colorScheme.primary,
@@ -151,7 +154,7 @@ fun ScheduleScreen(
                     ) {
                         weekDays.forEach { day ->
                             val isSelected = day == selectedDate && mode == ScheduleMode.DAY
-                            val isToday = day == todayLa
+                            val isToday = day == today
                             val count = activeCountsByDate[day.toString()] ?: 0
                             Column(
                                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -191,7 +194,7 @@ fun ScheduleScreen(
                                         .background(
                                             when {
                                                 count == 0 -> MaterialTheme.colorScheme.surface.copy(alpha = 0f)
-                                                day.isBefore(todayLa) -> TerracottaError
+                                                day.isBefore(today) -> TerracottaError
                                                 isSelected -> MaterialTheme.colorScheme.onPrimary
                                                 else -> MaterialTheme.colorScheme.secondary
                                             }
@@ -219,9 +222,9 @@ fun ScheduleScreen(
                     label = { Text(lStr(R.string.this_week)) }
                 )
                 FilterChip(
-                    selected = mode == ScheduleMode.DAY && selectedDate == todayLa,
+                    selected = mode == ScheduleMode.DAY && selectedDate == today,
                     onClick = {
-                        selectedDate = todayLa
+                        selectedDate = today
                         mode = ScheduleMode.DAY
                     },
                     label = { Text(lStr(R.string.today)) }
@@ -264,13 +267,13 @@ fun ScheduleScreen(
                             Text(
                                 text = dayHeader,
                                 style = MaterialTheme.typography.titleMedium,
-                                color = if (parsed != null && parsed.isBefore(todayLa)) TerracottaError
+                                color = if (parsed != null && parsed.isBefore(today)) TerracottaError
                                 else MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(top = 6.dp)
                             )
                         }
                         items(rows, key = { it.job.id }) { row ->
-                            JobCard(row = row, onClick = { onOpenJob(row.job.id) })
+                            JobCard(row = row, zoneId = zoneId, onClick = { onOpenJob(row.job.id) })
                         }
                     }
                 }

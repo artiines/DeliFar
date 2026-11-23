@@ -39,6 +39,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +56,7 @@ import com.delifar.app.data.DraftItemInput
 import com.delifar.app.data.JobType
 import com.delifar.app.data.StoreWithHours
 import com.delifar.app.domain.BusinessRules
+import com.delifar.app.domain.RolePermissions
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.theme.AmberAccent
@@ -76,7 +78,11 @@ fun JobEditorScreen(
     onSaved: (String) -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val prefs by viewModel.preferences.collectAsState()
+    val employees by viewModel.employees.collectAsState()
+    val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
     val activeStores = remember(stores) { stores.filter { !it.store.archived } }
+    val assignableEmployees = remember(employees) { employees.filter { it.active } }
 
     val stableJobId = remember(jobIdArg, resumeDraftId) {
         jobIdArg ?: resumeDraftId ?: UUID.randomUUID().toString()
@@ -86,23 +92,26 @@ fun JobEditorScreen(
 
     var storeId by remember { mutableStateOf(preselectedStoreId ?: activeStores.firstOrNull()?.store?.id.orEmpty()) }
     var type by remember { mutableStateOf(JobType.DELIVERY) }
-    var dateIso by remember { mutableStateOf(BusinessRules.todayIso()) }
+    var dateIso by remember { mutableStateOf(BusinessRules.todayIso(zoneId)) }
     var timeIso by remember { mutableStateOf("") }
     var reminderEnabled by remember { mutableStateOf(true) }
+    var assignedDriverUid by remember { mutableStateOf<String?>(null) }
+    var assignedDriverName by remember { mutableStateOf("") }
+    var notes by remember { mutableStateOf("") }
     val itemRows = remember { mutableStateListOf(DraftItemInput()) }
 
     var storeMenuExpanded by remember { mutableStateOf(false) }
+    var driverMenuExpanded by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
 
-    // Load draft or existing job
     LaunchedEffect(stableJobId) {
         val draft = viewModel.repository.db.draftDao().getDraft(stableJobId)
         if (draft != null) {
             isEditingExisting = draft.isEditingExisting
             storeId = draft.storeId.ifBlank { preselectedStoreId ?: activeStores.firstOrNull()?.store?.id.orEmpty() }
             type = draft.type
-            dateIso = draft.date.ifBlank { BusinessRules.todayIso() }
+            dateIso = draft.date.ifBlank { BusinessRules.todayIso(zoneId) }
             timeIso = draft.time
             reminderEnabled = draft.reminderEnabled
             val decoded = DeliFarRepository.decodeDraftItems(draft.itemsJson)
@@ -117,6 +126,9 @@ fun JobEditorScreen(
                 dateIso = existing.job.date
                 timeIso = existing.job.time ?: ""
                 reminderEnabled = existing.job.reminderEnabled
+                assignedDriverUid = existing.job.assignedDriverUid
+                assignedDriverName = existing.job.assignedDriverName
+                notes = existing.job.notes
                 itemRows.clear()
                 itemRows.addAll(
                     existing.sortedItems.map {
@@ -128,7 +140,6 @@ fun JobEditorScreen(
         initialized = true
     }
 
-    // Persist draft to Room whenever fields change
     fun persistDraftNow() {
         if (!initialized || saving) return
         viewModel.saveDraftAsync(
@@ -180,7 +191,6 @@ fun JobEditorScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Delivery vs Pickup toggle
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     FilterChip(
@@ -196,7 +206,6 @@ fun JobEditorScreen(
                 }
             }
 
-            // Store dropdown
             item {
                 ExposedDropdownMenuBox(
                     expanded = storeMenuExpanded,
@@ -240,13 +249,56 @@ fun JobEditorScreen(
                 }
             }
 
-            // Date & optional Time
+            // Driver Assignment Dropdown (Owner / Manager when company has employees)
+            if (RolePermissions.canAssignDrivers(prefs.activeUserRole) && assignableEmployees.isNotEmpty()) {
+                item {
+                    ExposedDropdownMenuBox(
+                        expanded = driverMenuExpanded,
+                        onExpandedChange = { driverMenuExpanded = it }
+                    ) {
+                        OutlinedTextField(
+                            value = assignedDriverName.ifBlank { lStr(R.string.unassigned_driver) },
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text(lStr(R.string.assign_driver)) },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = driverMenuExpanded) },
+                            modifier = Modifier
+                                .menuAnchor()
+                                .fillMaxWidth()
+                        )
+                        ExposedDropdownMenu(
+                            expanded = driverMenuExpanded,
+                            onDismissRequest = { driverMenuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(lStr(R.string.unassigned_driver)) },
+                                onClick = {
+                                    assignedDriverUid = null
+                                    assignedDriverName = ""
+                                    driverMenuExpanded = false
+                                }
+                            )
+                            assignableEmployees.forEach { emp ->
+                                DropdownMenuItem(
+                                    text = { Text("${emp.displayName} (${emp.role})") },
+                                    onClick = {
+                                        assignedDriverUid = emp.uid
+                                        assignedDriverName = emp.displayName
+                                        driverMenuExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
                         value = dateIso,
                         onValueChange = { dateIso = it; errorMsg = null; persistDraftNow() },
-                        label = { Text(lStr(R.string.date_label)) },
+                        label = { Text("${lStr(R.string.date_label)} (${zoneId.id.substringAfterLast("/")})") },
                         placeholder = { Text("YYYY-MM-DD") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
@@ -262,7 +314,15 @@ fun JobEditorScreen(
                 }
             }
 
-            // Receiving hours warning banner
+            item {
+                OutlinedTextField(
+                    value = notes,
+                    onValueChange = { notes = it },
+                    label = { Text(lStr(R.string.job_notes_label)) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
             if (hoursWarning != null && hoursWarning != BusinessRules.HoursCheckResult.OK) {
                 item {
                     val warnText = when (hoursWarning) {
@@ -293,7 +353,6 @@ fun JobEditorScreen(
                 }
             }
 
-            // Timed reminder switch
             if (timeIso.isNotBlank()) {
                 item {
                     Row(
@@ -310,7 +369,6 @@ fun JobEditorScreen(
                 }
             }
 
-            // Product lines header
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -336,7 +394,6 @@ fun JobEditorScreen(
                 }
             }
 
-            // Product line cards
             itemsIndexed(itemRows, key = { _, item -> item.id }) { idx, item ->
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -430,7 +487,10 @@ fun JobEditorScreen(
                                 dateIso = dateIso.trim(),
                                 timeIso = timeIso.trim().ifEmpty { null },
                                 reminderEnabled = reminderEnabled,
-                                items = itemRows.toList()
+                                items = itemRows.toList(),
+                                assignedDriverUid = assignedDriverUid,
+                                assignedDriverName = assignedDriverName,
+                                notes = notes
                             )
                             saving = false
                             res.fold(

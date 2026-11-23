@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Store
 import androidx.compose.material3.Button
@@ -48,13 +49,16 @@ import com.delifar.app.data.JobListRow
 import com.delifar.app.data.JobStatus
 import com.delifar.app.data.StoreWithHours
 import com.delifar.app.domain.BusinessRules
+import com.delifar.app.domain.RolePermissions
 import com.delifar.app.ui.components.JobCard
+import com.delifar.app.ui.components.RoleBadge
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.theme.AmberContainer
 import com.delifar.app.ui.theme.SuccessContainer
 import com.delifar.app.ui.theme.SuccessGreen
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -64,21 +68,25 @@ fun HomeScreen(
     stores: List<StoreWithHours>,
     jobRows: List<JobListRow>,
     latestDraft: DraftEntity?,
+    zoneId: ZoneId,
+    userRole: String,
+    companyName: String?,
     onOpenSettings: () -> Unit,
+    onOpenTeam: () -> Unit,
     onNewJob: () -> Unit,
     onResumeDraft: (DraftEntity) -> Unit,
     onDiscardDraft: (String) -> Unit,
     onOpenJob: (String) -> Unit,
     onAddStore: () -> Unit
 ) {
-    val todayLa = remember { BusinessRules.todayLa() }
-    val todayIso = todayLa.toString()
-    val prettyDate = remember(todayLa) {
-        todayLa.format(DateTimeFormatter.ofPattern("EEE, MMM d", Locale.US))
+    val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
+    val todayIso = today.toString()
+    val prettyDate = remember(today) {
+        today.format(DateTimeFormatter.ofPattern("EEE, MMM d", Locale.US))
     }
 
-    val overdueJobs = remember(jobRows, todayLa) {
-        BusinessRules.sortJobsForDay(jobRows.filter { BusinessRules.isOverdue(it.job.date, it.job.status, todayLa) })
+    val overdueJobs = remember(jobRows, today) {
+        BusinessRules.sortJobsForDay(jobRows.filter { BusinessRules.isOverdue(it.job.date, it.job.status, today) })
     }
     val todayJobs = remember(jobRows, todayIso) {
         BusinessRules.sortJobsForDay(jobRows.filter { it.job.date == todayIso })
@@ -86,24 +94,31 @@ fun HomeScreen(
     val todayActiveCount = todayJobs.count { it.job.status in JobStatus.ACTIVE }
     val completedTodayCount = todayJobs.count { it.job.status == JobStatus.COMPLETED }
     val activeStores = stores.filter { !it.store.archived }
+    val canManage = RolePermissions.canManageStoresAndJobs(userRole)
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Column {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = companyName?.ifBlank { lStr(R.string.home_title) } ?: lStr(R.string.home_title),
+                                style = MaterialTheme.typography.headlineMedium
+                            )
+                            RoleBadge(role = userRole)
+                        }
                         Text(
-                            text = lStr(R.string.home_title),
-                            style = MaterialTheme.typography.headlineMedium
-                        )
-                        Text(
-                            text = "$prettyDate • ${lStr(R.string.la_time_label)}",
+                            text = "$prettyDate • ${zoneId.id}",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 },
                 actions = {
+                    IconButton(onClick = onOpenTeam) {
+                        Icon(Icons.Default.Groups, contentDescription = lStr(R.string.team_management))
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, contentDescription = lStr(R.string.settings))
                     }
@@ -114,7 +129,7 @@ fun HomeScreen(
             )
         },
         floatingActionButton = {
-            if (activeStores.isNotEmpty()) {
+            if (activeStores.isNotEmpty() && canManage) {
                 ExtendedFloatingActionButton(
                     onClick = onNewJob,
                     icon = { Icon(Icons.Default.Add, contentDescription = null) },
@@ -132,7 +147,6 @@ fun HomeScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // KPI summary strip
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -162,8 +176,7 @@ fun HomeScreen(
                 }
             }
 
-            // Draft recovery banner
-            if (latestDraft != null) {
+            if (latestDraft != null && canManage) {
                 item {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = AmberContainer),
@@ -209,8 +222,7 @@ fun HomeScreen(
                 }
             }
 
-            // First-time onboarding card if no active stores
-            if (activeStores.isEmpty()) {
+            if (activeStores.isEmpty() && canManage) {
                 item {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
@@ -246,7 +258,6 @@ fun HomeScreen(
                 }
             }
 
-            // Overdue section
             if (overdueJobs.isNotEmpty()) {
                 item {
                     Text(
@@ -257,11 +268,10 @@ fun HomeScreen(
                     )
                 }
                 items(overdueJobs, key = { "overdue_${it.job.id}" }) { row ->
-                    JobCard(row = row, onClick = { onOpenJob(row.job.id) })
+                    JobCard(row = row, zoneId = zoneId, onClick = { onOpenJob(row.job.id) })
                 }
             }
 
-            // Today's work section
             item {
                 Text(
                     text = "${lStr(R.string.home_today_jobs)} (${todayJobs.size})",
@@ -289,7 +299,7 @@ fun HomeScreen(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            if (activeStores.isNotEmpty()) {
+                            if (activeStores.isNotEmpty() && canManage) {
                                 OutlinedButton(onClick = onNewJob) {
                                     Icon(Icons.Default.Add, contentDescription = null)
                                     Spacer(Modifier.width(6.dp))
@@ -301,7 +311,7 @@ fun HomeScreen(
                 }
             } else {
                 items(todayJobs, key = { "today_${it.job.id}" }) { row ->
-                    JobCard(row = row, onClick = { onOpenJob(row.job.id) })
+                    JobCard(row = row, zoneId = zoneId, onClick = { onOpenJob(row.job.id) })
                 }
             }
         }

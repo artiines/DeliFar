@@ -1,10 +1,12 @@
 package com.delifar.app.domain
 
+import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.HoursMode
 import com.delifar.app.data.JobListRow
 import com.delifar.app.data.JobStatus
 import com.delifar.app.data.StoreHoursEntity
 import java.math.BigDecimal
+import java.security.MessageDigest
 import java.time.Clock
 import java.time.DayOfWeek
 import java.time.Instant
@@ -16,17 +18,71 @@ import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.time.temporal.TemporalAdjusters
 
+object RolePermissions {
+    fun canManageCompany(role: String): Boolean = role == EmployeeRole.OWNER
+
+    fun canManageEmployees(role: String): Boolean = role == EmployeeRole.OWNER
+
+    fun canManageStoresAndJobs(role: String): Boolean =
+        role == EmployeeRole.OWNER || role == EmployeeRole.MANAGER
+
+    fun canAssignDrivers(role: String): Boolean =
+        role == EmployeeRole.OWNER || role == EmployeeRole.MANAGER
+
+    fun canUpdateAssignedJobs(role: String): Boolean =
+        role == EmployeeRole.OWNER || role == EmployeeRole.MANAGER || role == EmployeeRole.DRIVER
+
+    fun canUploadAndSignInvoices(role: String): Boolean =
+        role == EmployeeRole.OWNER || role == EmployeeRole.MANAGER || role == EmployeeRole.DRIVER
+
+    fun canViewAllInvoices(role: String): Boolean =
+        role == EmployeeRole.OWNER || role == EmployeeRole.MANAGER || role == EmployeeRole.ACCOUNTANT
+
+    fun canExportInvoices(role: String): Boolean =
+        role == EmployeeRole.OWNER || role == EmployeeRole.MANAGER || role == EmployeeRole.ACCOUNTANT
+
+    fun canVoidOrCorrectInvoices(role: String): Boolean =
+        role == EmployeeRole.OWNER || role == EmployeeRole.MANAGER
+}
+
 object BusinessRules {
     val LA_ZONE: ZoneId = ZoneId.of("America/Los_Angeles")
+    val SUPPORTED_TIMEZONES: List<String> = listOf(
+        "America/Los_Angeles",
+        "America/Denver",
+        "America/Chicago",
+        "America/New_York",
+        "Asia/Yerevan",
+        "Europe/Moscow",
+        "Europe/London",
+        "UTC"
+    )
+
     private val TIME_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+    private val DATETIME_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm z")
     private val QUANTITY_REGEX = Regex("^\\d{1,12}(\\.\\d{1,6})?$")
 
-    fun nowLa(clock: Clock = Clock.systemUTC()): ZonedDateTime =
-        ZonedDateTime.now(clock).withZoneSameInstant(LA_ZONE)
+    fun resolveZone(zoneIdString: String?): ZoneId {
+        if (zoneIdString.isNullOrBlank()) return LA_ZONE
+        return runCatching { ZoneId.of(zoneIdString.trim()) }.getOrDefault(LA_ZONE)
+    }
 
-    fun todayLa(clock: Clock = Clock.systemUTC()): LocalDate = nowLa(clock).toLocalDate()
+    fun nowInZone(zoneId: ZoneId = LA_ZONE, clock: Clock = Clock.systemUTC()): ZonedDateTime =
+        ZonedDateTime.now(clock).withZoneSameInstant(zoneId)
 
-    fun todayIso(clock: Clock = Clock.systemUTC()): String = todayLa(clock).toString()
+    fun nowLa(clock: Clock = Clock.systemUTC()): ZonedDateTime = nowInZone(LA_ZONE, clock)
+
+    fun todayInZone(zoneId: ZoneId = LA_ZONE, clock: Clock = Clock.systemUTC()): LocalDate =
+        nowInZone(zoneId, clock).toLocalDate()
+
+    fun todayLa(clock: Clock = Clock.systemUTC()): LocalDate = todayInZone(LA_ZONE, clock)
+
+    fun todayIso(zoneId: ZoneId = LA_ZONE, clock: Clock = Clock.systemUTC()): String =
+        todayInZone(zoneId, clock).toString()
+
+    fun formatTimestamp(epochMs: Long, zoneId: ZoneId = LA_ZONE): String {
+        return Instant.ofEpochMilli(epochMs).atZone(zoneId).format(DATETIME_FMT)
+    }
 
     fun parseIsoDate(raw: String): LocalDate? = try {
         if (raw.length != 10) null else LocalDate.parse(raw)
@@ -84,11 +140,13 @@ object BusinessRules {
         return t.isBefore(now.toLocalTime())
     }
 
-    fun jobInstantLa(date: String, time: String): Instant? {
+    fun jobInstant(date: String, time: String, zoneId: ZoneId = LA_ZONE): Instant? {
         val d = parseIsoDate(date) ?: return null
         val t = parseIsoTime(time) ?: return null
-        return ZonedDateTime.of(d, t, LA_ZONE).toInstant()
+        return ZonedDateTime.of(d, t, zoneId).toInstant()
     }
+
+    fun jobInstantLa(date: String, time: String): Instant? = jobInstant(date, time, LA_ZONE)
 
     /**
      * Parses decimal quantity allowing '.' or ',' as locale separator.
@@ -97,7 +155,6 @@ object BusinessRules {
     fun normalizeQuantity(input: String, allowZero: Boolean): String? {
         val trimmed = input.trim().replace(" ", "")
         if (trimmed.isEmpty()) return null
-        // Allow locale comma as decimal separator when no dot is present
         val normalized = if (trimmed.contains(',') && !trimmed.contains('.')) {
             trimmed.replace(',', '.')
         } else {
@@ -172,9 +229,15 @@ object BusinessRules {
         }
     }
 
-    fun isValidHttpsUrl(url: String): Boolean {
-        val trimmed = url.trim()
-        return trimmed.startsWith("https://") && trimmed.length > 10 && !trimmed.contains(" ")
+    fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    fun generateInviteCode(): String {
+        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        val rnd = java.security.SecureRandom()
+        return (1..8).map { alphabet[rnd.nextInt(alphabet.length)] }.joinToString("")
     }
 
     fun sortJobsForDay(rows: List<JobListRow>): List<JobListRow> {

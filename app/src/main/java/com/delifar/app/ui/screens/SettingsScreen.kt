@@ -1,7 +1,9 @@
 package com.delifar.app.ui.screens
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,15 +22,22 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Business
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,10 +61,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.delifar.app.R
+import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.PrefKeys
 import com.delifar.app.data.SearchArea
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.ui.DeliFarViewModel
+import com.delifar.app.ui.components.RoleBadge
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.theme.SuccessGreen
 
@@ -63,11 +74,17 @@ import com.delifar.app.ui.theme.SuccessGreen
 @Composable
 fun SettingsScreen(
     viewModel: DeliFarViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenAccount: () -> Unit,
+    onOpenTeam: () -> Unit
 ) {
     val context = LocalContext.current
     val prefs by viewModel.preferences.collectAsState()
+    val company by viewModel.activeCompany.collectAsState()
+    val pendingSyncCount by viewModel.pendingSyncCount.collectAsState()
+    val failedSyncCount by viewModel.failedSyncCount.collectAsState()
     val importPreview by viewModel.importPreview.collectAsState()
+    val pendingMigration by viewModel.pendingMigration.collectAsState()
 
     var hasNotifPermission by remember {
         mutableStateOf(
@@ -101,8 +118,8 @@ fun SettingsScreen(
     var advanceInput by remember(prefs.advance) {
         mutableStateOf(prefs.advance.toString())
     }
-    var searchUrlInput by remember(prefs.searchUrl) { mutableStateOf(prefs.searchUrl) }
-    var tileUrlInput by remember(prefs.tileUrl) { mutableStateOf(prefs.tileUrl) }
+    var tzDropdownExpanded by remember { mutableStateOf(false) }
+    val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
 
     Scaffold(
         topBar = {
@@ -124,6 +141,127 @@ fun SettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            // Cloud Account, Company & Sync
+            item {
+                SettingsCard(title = lStr(R.string.account_and_company)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = company?.name ?: lStr(R.string.sync_offline_mode),
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                text = prefs.activeUserEmail.ifBlank { prefs.activeUserName.ifBlank { "Local Profile" } },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        RoleBadge(role = prefs.activeUserRole)
+                    }
+
+                    Text(
+                        text = "Queue: $pendingSyncCount pending • $failedSyncCount failed",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onOpenAccount,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Business, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text(lStr(R.string.account_and_company))
+                        }
+                        OutlinedButton(
+                            onClick = onOpenTeam,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Groups, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text(lStr(R.string.team_management))
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { viewModel.triggerSyncNow() },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.CloudSync, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text(lStr(R.string.sync_now))
+                        }
+                        if (company != null && prefs.activeUserRole == EmployeeRole.OWNER) {
+                            OutlinedButton(
+                                onClick = { viewModel.checkUnmigratedLocalData() },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(lStr(R.string.migrate_local_data))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Company Timezone & Default Search Area
+            item {
+                SettingsCard(title = lStr(R.string.company_timezone_label)) {
+                    ExposedDropdownMenuBox(
+                        expanded = tzDropdownExpanded,
+                        onExpandedChange = { tzDropdownExpanded = !tzDropdownExpanded }
+                    ) {
+                        OutlinedTextField(
+                            value = prefs.companyTimezone,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text(lStr(R.string.company_timezone_label)) },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = tzDropdownExpanded) },
+                            modifier = Modifier
+                                .menuAnchor()
+                                .fillMaxWidth()
+                        )
+                        ExposedDropdownMenu(
+                            expanded = tzDropdownExpanded,
+                            onDismissRequest = { tzDropdownExpanded = false }
+                        ) {
+                            BusinessRules.SUPPORTED_TIMEZONES.forEach { tz ->
+                                DropdownMenuItem(
+                                    text = { Text(tz) },
+                                    onClick = {
+                                        viewModel.updatePreference(PrefKeys.COMPANY_TIMEZONE, tz)
+                                        tzDropdownExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = lStr(R.string.settings_default_area),
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = prefs.area == SearchArea.LA,
+                            onClick = { viewModel.updatePreference(PrefKeys.AREA, SearchArea.LA) },
+                            label = { Text(lStr(R.string.area_la)) }
+                        )
+                        FilterChip(
+                            selected = prefs.area == SearchArea.SAC,
+                            onClick = { viewModel.updatePreference(PrefKeys.AREA, SearchArea.SAC) },
+                            label = { Text(lStr(R.string.area_sac)) }
+                        )
+                    }
+                }
+            }
+
             // Language selector
             item {
                 SettingsCard(title = lStr(R.string.settings_language)) {
@@ -154,25 +292,7 @@ fun SettingsScreen(
                 }
             }
 
-            // Default Area
-            item {
-                SettingsCard(title = lStr(R.string.settings_default_area)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = prefs.area == SearchArea.LA,
-                            onClick = { viewModel.updatePreference(PrefKeys.AREA, SearchArea.LA) },
-                            label = { Text(lStr(R.string.area_la)) }
-                        )
-                        FilterChip(
-                            selected = prefs.area == SearchArea.SAC,
-                            onClick = { viewModel.updatePreference(PrefKeys.AREA, SearchArea.SAC) },
-                            label = { Text(lStr(R.string.area_sac)) }
-                        )
-                    }
-                }
-            }
-
-            // Reminders
+            // Reminders & Push Notification Preferences
             item {
                 SettingsCard(title = lStr(R.string.settings_reminders)) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -198,17 +318,11 @@ fun SettingsScreen(
                         }
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(lStr(R.string.settings_daily_summary), style = MaterialTheme.typography.bodyLarge)
-                        Switch(
-                            checked = prefs.daily,
-                            onCheckedChange = { viewModel.updatePreference(PrefKeys.DAILY, it.toString()) }
-                        )
-                    }
+                    ToggleSettingRow(
+                        label = lStr(R.string.settings_daily_summary),
+                        checked = prefs.daily,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.DAILY, it.toString()) }
+                    )
 
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
@@ -231,17 +345,11 @@ fun SettingsScreen(
                         ) { Text(lStr(R.string.save)) }
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(lStr(R.string.settings_job_reminders), style = MaterialTheme.typography.bodyLarge)
-                        Switch(
-                            checked = prefs.jobReminders,
-                            onCheckedChange = { viewModel.updatePreference(PrefKeys.JOB_REMINDERS, it.toString()) }
-                        )
-                    }
+                    ToggleSettingRow(
+                        label = lStr(R.string.settings_job_reminders),
+                        checked = prefs.jobReminders,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.JOB_REMINDERS, it.toString()) }
+                    )
 
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
@@ -263,36 +371,50 @@ fun SettingsScreen(
                             }
                         ) { Text(lStr(R.string.save)) }
                     }
-                }
-            }
 
-            // Map & Search Services
-            item {
-                SettingsCard(title = lStr(R.string.settings_map_services)) {
-                    OutlinedTextField(
-                        value = searchUrlInput,
-                        onValueChange = { searchUrlInput = it },
-                        label = { Text(lStr(R.string.settings_search_url)) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                    // 8 Granular Cloud Notification Switches
+                    ToggleSettingRow(
+                        label = lStr(R.string.notif_new_assignment),
+                        checked = prefs.notifNewAssignment,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.NOTIF_NEW_ASSIGNMENT, it.toString()) }
                     )
-                    OutlinedTextField(
-                        value = tileUrlInput,
-                        onValueChange = { tileUrlInput = it },
-                        label = { Text(lStr(R.string.settings_tile_url)) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                    ToggleSettingRow(
+                        label = lStr(R.string.notif_upcoming),
+                        checked = prefs.notifUpcoming,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.NOTIF_UPCOMING, it.toString()) }
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { viewModel.updateServiceUrls(searchUrlInput, tileUrlInput) },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(lStr(R.string.save)) }
-                        OutlinedButton(
-                            onClick = { viewModel.resetServiceUrls() },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(lStr(R.string.settings_reset_defaults)) }
-                    }
+                    ToggleSettingRow(
+                        label = lStr(R.string.notif_changed_assignment),
+                        checked = prefs.notifChangedAssignment,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.NOTIF_CHANGED_ASSIGNMENT, it.toString()) }
+                    )
+                    ToggleSettingRow(
+                        label = lStr(R.string.notif_completed),
+                        checked = prefs.notifCompleted,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.NOTIF_COMPLETED, it.toString()) }
+                    )
+                    ToggleSettingRow(
+                        label = lStr(R.string.notif_signed_invoice),
+                        checked = prefs.notifSignedInvoice,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.NOTIF_SIGNED_INVOICE, it.toString()) }
+                    )
+                    ToggleSettingRow(
+                        label = lStr(R.string.notif_missing_signature),
+                        checked = prefs.notifMissingSignature,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.NOTIF_MISSING_SIGNATURE, it.toString()) }
+                    )
+                    ToggleSettingRow(
+                        label = lStr(R.string.notif_failed_upload),
+                        checked = prefs.notifFailedUpload,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.NOTIF_FAILED_UPLOAD, it.toString()) }
+                    )
+                    ToggleSettingRow(
+                        label = lStr(R.string.notif_employee_invite),
+                        checked = prefs.notifEmployeeInvite,
+                        onCheckedChange = { viewModel.updatePreference(PrefKeys.NOTIF_EMPLOYEE_INVITE, it.toString()) }
+                    )
                 }
             }
 
@@ -306,7 +428,7 @@ fun SettingsScreen(
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
-                            onClick = { exportLauncher.launch("delifar-backup-${BusinessRules.todayIso()}.json") },
+                            onClick = { exportLauncher.launch("delifar-backup-${BusinessRules.todayIso(zoneId)}.json") },
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.Upload, contentDescription = null)
@@ -325,7 +447,7 @@ fun SettingsScreen(
                 }
             }
 
-            // About & Attribution
+            // About DeliFar 2.0 & Google Maps Platform Legal Attribution
             item {
                 SettingsCard(title = lStr(R.string.settings_about)) {
                     Text(
@@ -333,9 +455,56 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                val uri = Uri.parse("https://cloud.google.com/maps-platform/terms")
+                                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                            }
+                        ) {
+                            Text("Google Maps Terms")
+                        }
+                        TextButton(
+                            onClick = {
+                                val uri = Uri.parse("https://policies.google.com/privacy")
+                                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                            }
+                        ) {
+                            Text("Google Privacy Policy")
+                        }
+                    }
                 }
             }
         }
+    }
+
+    // Owner-Confirmed Local-to-Cloud Migration Dialog
+    pendingMigration?.let { summary ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissMigrationPrompt() },
+            title = { Text(lStr(R.string.migrate_confirm_title)) },
+            text = {
+                Text(
+                    lStr(
+                        R.string.migrate_confirm_body,
+                        summary.storesCount,
+                        summary.jobsCount,
+                        summary.invoicesCount,
+                        company?.name ?: ""
+                    )
+                )
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.confirmMigrateLocalData() }) {
+                    Text(lStr(R.string.confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissMigrationPrompt() }) {
+                    Text(lStr(R.string.cancel))
+                }
+            }
+        )
     }
 
     // Validated Backup Import Preview Dialog
@@ -386,6 +555,22 @@ fun SettingsScreen(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun ToggleSettingRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 

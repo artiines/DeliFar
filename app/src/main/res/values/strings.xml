@@ -6,6 +6,7 @@
     <string name="tab_home">Home</string>
     <string name="tab_map">Map</string>
     <string name="tab_schedule">Schedule</string>
+    <string name="tab_invoices">Invoices</string>
     <string name="tab_stores">Stores</string>
 
     <!-- Common -->
@@ -24,7 +25,51 @@
     <string name="overdue">Overdue</string>
     <string name="upcoming">Upcoming</string>
     <string name="this_week">This Week</string>
-    <string name="la_time_label">Los Angeles Time</string>
+    <string name="company_time_label">Company Time</string>
+
+    <!-- Roles -->
+    <string name="role_owner">Owner</string>
+    <string name="role_manager">Manager</string>
+    <string name="role_driver">Driver</string>
+    <string name="role_accountant">Accountant</string>
+
+    <!-- Cloud & Sync -->
+    <string name="sync_synced">Synced</string>
+    <string name="sync_syncing">Syncing…</string>
+    <string name="sync_pending">%1$d pending upload</string>
+    <string name="sync_failed">%1$d upload failed — tap to retry</string>
+    <string name="sync_offline_mode">Offline Mode</string>
+    <string name="sync_now">Sync Now</string>
+    <string name="maps_quota_warning">Google Maps daily quota reached. Some map or route requests are limited.</string>
+    <string name="maps_quota_learn_more">Quota info</string>
+
+    <!-- Auth & Company -->
+    <string name="account_and_company">Account &amp; Company</string>
+    <string name="sign_in">Sign In</string>
+    <string name="create_account">Create Account</string>
+    <string name="sign_out">Sign Out</string>
+    <string name="continue_offline">Continue Offline</string>
+    <string name="email_label">Email</string>
+    <string name="password_label">Password</string>
+    <string name="full_name_label">Full Name</string>
+    <string name="register_company">Register Company</string>
+    <string name="company_name_label">Company Name</string>
+    <string name="company_timezone_label">Company Timezone</string>
+    <string name="join_with_invite">Join with Invite Code</string>
+    <string name="invite_code_label">Invite Code</string>
+    <string name="team_management">Team &amp; Company</string>
+    <string name="invite_employee">Invite Employee</string>
+    <string name="employees_tab">Employees</string>
+    <string name="invitations_tab">Invitations</string>
+    <string name="activity_tab">Activity Log</string>
+    <string name="active_status">Active</string>
+    <string name="deactivated_status">Deactivated</string>
+    <string name="activate">Activate</string>
+    <string name="deactivate">Deactivate</string>
+    <string name="revoke">Revoke</string>
+    <string name="migrate_local_data">Migrate Local Data to Cloud</string>
+    <string name="migrate_confirm_title">Confirm Data Migration</string>
+    <string name="migrate_confirm_body">Move %1$d stores, %2$d jobs, and %3$d invoices stored locally into company \"%4$s\"? Records keep their IDs to prevent duplicates.</string>
 
     <!-- Home -->
     <string name="home_title">DeliFar</string>
@@ -53,9 +98,12 @@
     <string name="issue_partial">Partial</string>
     <string name="issue_closed">Store Closed</string>
     <string name="issue_refused">Refused</string>
+    <string name="issue_unavailable">Recipient Unavailable</string>
+    <string name="issue_damaged">Damaged Products</string>
+    <string name="issue_unsigned">Unsigned Invoice</string>
     <string name="issue_other">Other Issue</string>
 
-    <!-- Stores -->
+    <!-- Stores & Google Places -->
     <string name="stores_title">Stores</string>
     <string name="add_store">Add Store</string>
     <string name="edit_store">Edit Store</string>
@@ -66,14 +114,11 @@
     <string name="search_stores_hint">Filter saved stores…</string>
     <string name="area_la">Los Angeles</string>
     <string name="area_sac">Sacramento</string>
-    <string name="photon_search_hint">Business name or street address</string>
-    <string name="photon_search_button">Search OSM</string>
-    <string name="photon_searching">Searching OpenStreetMap…</string>
-    <string name="photon_no_results">No matching places found in this area.</string>
-    <string name="photon_attribution">Search powered by Photon • © OpenStreetMap contributors (ODbL)</string>
-    <string name="osm_attribution">© OpenStreetMap contributors</string>
-    <string name="manual_entry">Manual entry</string>
-    <string name="duplicate_store_warning">A store with this OpenStreetMap location is already saved.</string>
+    <string name="places_search_hint">Search business or address on Google</string>
+    <string name="places_searching">Searching Google Places…</string>
+    <string name="places_no_results">No matching places found in this area.</string>
+    <string name="places_attribution">Powered by Google</string>
+    <string name="duplicate_store_warning">A store with this Google Place is already saved.</string>
     <string name="store_name">Store Name</string>
     <string name="store_address">Full Address</string>
     <string name="store_phone">Phone (optional)</string>
@@ -85,7 +130,7 @@
     <string name="archive_store">Archive Store</string>
     <string name="restore_store">Restore Store</string>
     <string name="archive_blocked_active_jobs">Complete or cancel active jobs at this store before archiving.</string>
-    <string name="directions">Directions</string>
+    <string name="directions">Google Maps</string>
     <string name="call_store">Call</string>
 
     <!-- Weekdays -->
@@ -101,7 +146,10 @@
     <string name="edit_job">Edit Job</string>
     <string name="job_details">Job Details</string>
     <string name="select_store">Select Store</string>
-    <string name="date_label">Date (LA)</string>
+    <string name="assign_driver">Assign Driver</string>
+    <string name="unassigned_driver">Unassigned</string>
+    <string name="job_notes_label">Delivery / Pickup Notes (optional)</string>
+    <string name="date_label">Date</string>
     <string name="time_label">Time (optional, HH:mm)</string>
     <string name="product_lines">Product Lines</string>
     <string name="add_product_line">Add Product Line</string>
@@ -122,11 +170,55 @@
     <string name="keep_work_open">Keep job open</string>
     <string name="issue_note_label">Issue note (optional)</string>
 
-    <!-- Map -->
+    <!-- Invoices & Electronic Signature -->
+    <string name="invoices_title">Invoices</string>
+    <string name="add_invoice">Add Invoice</string>
+    <string name="capture_photo">Take Photo</string>
+    <string name="pick_gallery">From Gallery</string>
+    <string name="import_pdf">Import PDF</string>
+    <string name="invoice_number_label">Invoice Number</string>
+    <string name="invoice_notes_label">Invoice Notes (optional)</string>
+    <string name="rotate_90">Rotate 90°</string>
+    <string name="enhance_contrast">Contrast</string>
+    <string name="crop_edges">Crop</string>
+    <string name="retake">Retake</string>
+    <string name="save_invoice">Save Invoice</string>
+    <string name="save_and_sign">Save &amp; Collect Signature</string>
+    <string name="collect_signature">Collect Signature</string>
+    <string name="signature_title">Electronic Invoice Signing</string>
+    <string name="recipient_name_label">Recipient Full Name</string>
+    <string name="recipient_title_label">Recipient Position / Title (optional)</string>
+    <string name="delivery_ack_label">I acknowledge receiving the delivery shown on this invoice.</string>
+    <string name="signature_pad_hint">Sign here with finger or stylus</string>
+    <string name="signature_position_hint">Tap or drag on the invoice preview to position signature</string>
+    <string name="signature_undo">Undo</string>
+    <string name="signature_redo">Redo</string>
+    <string name="signature_confirm_title">Confirm Signed Invoice</string>
+    <string name="signature_confirm_body">Once saved, this signed invoice becomes immutable and generates a high-quality PDF. Any future correction must create a new version.</string>
+    <string name="signature_disclaimer">Electronic receipt acknowledgment captured on mobile — not a certified cryptographic digital signature.</string>
+    <string name="invoice_status_not_signed">Not signed</string>
+    <string name="invoice_status_signed">Signed</string>
+    <string name="invoice_status_pending_upload">Pending upload</string>
+    <string name="invoice_status_synchronized">Synchronized</string>
+    <string name="invoice_status_upload_failed">Upload failed</string>
+    <string name="invoice_status_voided">Voided</string>
+    <string name="search_invoices_hint">Search invoice # or store…</string>
+    <string name="no_invoices_yet">No invoices found.</string>
+    <string name="view_signed_pdf">Open Signed PDF</string>
+    <string name="view_original_photo">View Original</string>
+    <string name="print_pdf">Print PDF</string>
+    <string name="share_pdf">Share PDF</string>
+    <string name="export_invoices_csv">Export CSV</string>
+    <string name="void_invoice">Void</string>
+    <string name="new_corrected_version">Corrected Version</string>
+
+    <!-- Map (Google Maps Platform Only) -->
     <string name="map_title">Route Map</string>
     <string name="map_list_view">List</string>
     <string name="map_canvas_view">Map</string>
-    <string name="map_tiles_offline">Map tiles unavailable offline — showing store markers and list.</string>
+    <string name="map_optimize_route">Optimize Route</string>
+    <string name="map_traffic">Traffic</string>
+    <string name="map_satellite">Satellite</string>
     <string name="map_jobs_at_store">%1$d jobs at this store</string>
 
     <!-- Schedule -->
@@ -140,7 +232,7 @@
     <string name="lang_ru">Русский</string>
     <string name="lang_hy">Հայերեն</string>
     <string name="settings_default_area">Default Search Area</string>
-    <string name="settings_reminders">Reminders (Los Angeles Time)</string>
+    <string name="settings_reminders">Reminders &amp; Notifications</string>
     <string name="settings_notifications_permission">Notification Permission</string>
     <string name="permission_granted">Granted</string>
     <string name="permission_request">Allow Notifications</string>
@@ -148,10 +240,14 @@
     <string name="settings_summary_time">Summary Time (HH:mm)</string>
     <string name="settings_job_reminders">Timed Job Reminders</string>
     <string name="settings_advance_minutes">Minutes Before Job</string>
-    <string name="settings_map_services">Map and Search Services</string>
-    <string name="settings_search_url">Photon Search HTTPS URL</string>
-    <string name="settings_tile_url">Tile Server HTTPS URL</string>
-    <string name="settings_reset_defaults">Reset Defaults</string>
+    <string name="notif_new_assignment">New Delivery Assignment</string>
+    <string name="notif_upcoming">Upcoming Delivery Reminder</string>
+    <string name="notif_changed_assignment">Changed Assignment</string>
+    <string name="notif_completed">Completed Delivery</string>
+    <string name="notif_signed_invoice">Signed Invoice Received</string>
+    <string name="notif_missing_signature">Missing Signature Alert</string>
+    <string name="notif_failed_upload">Failed Upload Alert</string>
+    <string name="notif_employee_invite">Employee Invitation</string>
     <string name="settings_backup">Business Data Backup</string>
     <string name="export_json">Export JSON Backup</string>
     <string name="import_json">Import JSON Backup</string>
@@ -160,6 +256,6 @@
     <string name="import_replace_conflicts">Replace conflicting existing records</string>
     <string name="import_restore_prefs">Restore app preferences from backup</string>
     <string name="import_apply">Apply Merge</string>
-    <string name="settings_about">About DeliFar</string>
-    <string name="about_text">Single-user offline delivery &amp; pickup organizer. Map data &amp; search © OpenStreetMap contributors (ODbL).</string>
+    <string name="settings_about">About DeliFar 2.0</string>
+    <string name="about_text">Cloud-connected multi-user delivery, pickup, and invoice signing platform powered by Google Firebase and Google Maps Platform.</string>
 </resources>
