@@ -36,8 +36,7 @@
     <string name="sync_failed">Վերբեռնման սխալ (%1$d) — կրկնել</string>
     <string name="sync_offline_mode">Օֆլայն ռեժիմ</string>
     <string name="sync_now">Համաժամեցնել</string>
-    <string name="maps_quota_warning">Google Maps-ի օրական սահմանաչափը սպառվել է։ Որոշ հարցումներ սահմանափակված են։</string>
-    <string name="maps_quota_learn_more">Մանրամասներ</string>
+    <string name="reset_defaults">Վերականգնել</string>
 
     <string name="account_and_company">Հաշիվ և ընկերություն</string>
     <string name="sign_in">Մուտք գործել</string>
@@ -105,14 +104,31 @@
     <string name="search_stores_hint">Ֆիլտրել խանութները…</string>
     <string name="area_la">Լոս Անջելես</string>
     <string name="area_sac">Սակրամենտո</string>
-    <string name="places_search_hint">Որոնել խանութ կամ հասցե Google-ում</string>
-    <string name="places_searching">Որոնում Google Places-ում…</string>
-    <string name="places_no_results">Այս տարածքում արդյունք չի գտնվել։</string>
-    <string name="places_attribution">Powered by Google</string>
-    <string name="duplicate_store_warning">Այս Google Place-ով խանութն արդեն պահպանված է։</string>
+    <string name="places_search_hint">Որոնել խանութ կամ հասցե (OSM / Գեոկոդեր)</string>
+    <string name="places_searching">Որոնում է հասցեներ…</string>
+    <string name="places_no_results">Արդյունք չի գտնվել։ Մուտքագրեք անվանումը և հասցեն վերևում կամ հպեք քարտեզին։</string>
+    <string name="places_attribution">Տվյալներ © OpenStreetMap • MapLibre և OpenFreeMap</string>
+    <string name="duplicate_store_warning">Այս վայրով խանութն արդեն պահպանված է։</string>
+    <string name="duplicate_manual_store_warning">Այս անվանումով և հասցեով խանութն արդեն պահպանված է։</string>
+    <string name="store_details_section">Խանութի անվանում և հասցե</string>
     <string name="store_name">Խանութի անվանում</string>
+    <string name="store_name_placeholder">Ցանկացած անվանում (կպահպանվի ինչպես գրել եք)</string>
     <string name="store_address">Ամբողջական հասցե</string>
+    <string name="store_address_placeholder">Փողոց, քաղաք, նահանգ (կամ կոորդինատներ / Google Maps հղում)</string>
     <string name="store_phone">Հեռախոս (ըստ ցանկության)</string>
+    <string name="locate_address">Գտնել հասցեն</string>
+    <string name="locating_address">Որոնվում է հասցեն…</string>
+    <string name="select_matching_location">Գտնվել է %1$d համընկնում — ընտրեք ճիշտը․</string>
+    <string name="confirm_pin_title">Դիրքը քարտեզի վրա</string>
+    <string name="tap_map_to_adjust_pin">Ստուգեք նշիչը։ Հպեք քարտեզին ձեռքով ուղղելու համար, ապա սեղմեք «Հաստատել դիրքը»։</string>
+    <string name="confirm_location">Հաստատել դիրքը</string>
+    <string name="location_confirmed_badge">Հաստատված է</string>
+    <string name="location_unconfirmed_badge">Հաստատեք նշիչը</string>
+    <string name="location_missing_badge">Նշիչ չկա</string>
+    <string name="no_pin_yet_hint">Սեղմեք «Գտնել հասցեն» կամ հպեք քարտեզին նշիչ տեղադրելու համար։</string>
+    <string name="confirm_location_required">Գտեք հասցեն (կամ հպեք քարտեզին) և սեղմեք «Հաստատել դիրքը» պահպանելուց առաջ։</string>
+    <string name="optional_directory_search">Ըստ ցանկության․ որոնել տեղեկագրում անունով</string>
+    <string name="invalid_store_coordinates">Խանութը չունի հաստատված կոորդինատներ։ Խմբագրեք խանութը՝ նշիչը հաստատելու համար։</string>
     <string name="receiving_hours">Ընդունման ժամեր</string>
     <string name="hours_unknown">Անհայտ</string>
     <string name="hours_closed">Փակ է</string>
@@ -121,7 +137,7 @@
     <string name="archive_store">Արխիվացնել</string>
     <string name="restore_store">Վերականգնել</string>
     <string name="archive_blocked_active_jobs">Արխիվացնելուց առաջ ավարտեք կամ չեղարկեք ակտիվ առաջադրանքները։</string>
-    <string name="directions">Google Քարտեզ</string>
+    <string name="directions">Երթուղի</string>
     <string name="call_store">Զանգահարել</string>
 
     <string name="day_mon">Երկ</string>
@@ -204,8 +220,8 @@
     <string name="map_list_view">Ցանկ</string>
     <string name="map_canvas_view">Քարտեզ</string>
     <string name="map_optimize_route">Օպտիմալացնել երթուղին</string>
-    <string name="map_traffic">Երթևեկություն</string>
-    <string name="map_satellite">Արբանյակ</string>
+    <string name="map_style_toggle">Փոխել քարտեզի ոճը</string>
+    <string name="map_attribution">© OpenFreeMap • © OpenStreetMap</string>
     <string name="map_jobs_at_store">Առաջադրանքներ խանութում՝ %1$d</string>
 
     <string name="schedule_title">Ժամանակացույց</string>
@@ -241,6 +257,12 @@
     <string name="import_replace_conflicts">Փոխարինել համընկնող գրառումները</string>
     <string name="import_restore_prefs">Վերականգնել կարգավորումները</string>
     <string name="import_apply">Կիրառել միավորումը</string>
+    <string name="settings_mapping_services">Քարտեզներ, գեոկոդավորում և երթուղի</string>
+    <string name="settings_mapping_policy_note">Օգտագործում է MapLibre + OpenFreeMap և Android Geocoder՝ առանց վճարովի API-ի։ Բարձր ծանրաբեռնվածության համար կարգավորեք սեփական HTTPS սերվեր։</string>
+    <string name="settings_map_style_url">Քարտեզի ոճի URL (HTTPS)</string>
+    <string name="settings_allow_osm_fallback">Միացնել OSM գեոկոդավորման պահեստային տարբերակը</string>
+    <string name="settings_geocoding_url">Գեոկոդավորման սերվերի URL (Nominatim HTTPS)</string>
+    <string name="settings_routing_url">Երթուղու սերվերի URL (OSRM HTTPS, ըստ ցանկության)</string>
     <string name="settings_about">DeliFar 2.0-ի մասին</string>
-    <string name="about_text">Ամպային բազմաօգտատեր առաքումների և հաշիվների ստորագրման հարթակ՝ Google Firebase և Google Maps Platform տեխնոլոգիաներով։</string>
+    <string name="about_text">Առաքումների, վերցնումների և հաշիվների ստորագրման հարթակ՝ MapLibre, OpenFreeMap, OpenStreetMap և Firebase տեխնոլոգիաներով։</string>
 </resources>

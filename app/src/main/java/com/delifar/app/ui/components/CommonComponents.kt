@@ -61,6 +61,7 @@ import com.delifar.app.data.JobStatus
 import com.delifar.app.data.JobType
 import com.delifar.app.data.StoreHoursEntity
 import com.delifar.app.domain.BusinessRules
+import com.delifar.app.network.GeoValidation
 import com.delifar.app.ui.theme.AmberAccent
 import com.delifar.app.ui.theme.AmberContainer
 import com.delifar.app.ui.theme.InfoBlue
@@ -256,52 +257,6 @@ fun SyncStatusBanner(
 
 private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
-/**
- * Mandatory Google Maps Platform Demo Key Quota Warning Banner (Section 8 Case A).
- */
-@Composable
-fun GoogleMapsQuotaBanner(
-    visible: Boolean,
-    onDismiss: () -> Unit
-) {
-    if (!visible) return
-    val context = LocalContext.current
-    Surface(
-        color = AmberContainer,
-        border = BorderStroke(1.dp, AmberAccent.copy(alpha = 0.5f)),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Default.Warning, contentDescription = null, tint = AmberAccent, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = lStr(R.string.maps_quota_warning),
-                style = MaterialTheme.typography.labelMedium,
-                color = Color(0xFF451A03),
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(
-                onClick = {
-                    val uri = Uri.parse(
-                        "https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
-                    )
-                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
-                }
-            ) {
-                Text(lStr(R.string.maps_quota_learn_more), style = MaterialTheme.typography.labelMedium)
-            }
-            TextButton(onClick = onDismiss) {
-                Text(lStr(R.string.close), style = MaterialTheme.typography.labelMedium)
-            }
-        }
-    }
-}
-
 @Composable
 fun JobCard(
     row: JobListRow,
@@ -482,23 +437,53 @@ fun todayHoursSummary(hours: List<StoreHoursEntity>, zoneId: ZoneId = BusinessRu
 }
 
 /**
- * Launches Google Maps EXCLUSIVELY for turn-by-turn driving navigation.
- * Targets `com.google.android.apps.maps` directly, falling back ONLY to Google Maps HTTPS directions.
+ * Launches external turn-by-turn driving navigation (Google Maps app preferred, free intent handoff,
+ * zero paid APIs). Validates coordinates before launching and refuses to navigate to invalid or
+ * placeholder coordinates; falls back to the street address only if coordinates are invalid.
  */
-fun launchDirections(context: Context, lat: Double, lon: Double, label: String) {
-    val navUri = Uri.parse("google.navigation:q=$lat,$lon&mode=d")
+fun launchDirections(
+    context: Context,
+    lat: Double,
+    lon: Double,
+    label: String,
+    address: String = ""
+): Boolean {
+    val validCoords = GeoValidation.isValidCoordinate(lat, lon)
+    val cleanAddress = address.trim()
+    if (!validCoords && cleanAddress.isEmpty()) {
+        return false
+    }
+
+    val navQuery = if (validCoords) {
+        "$lat,$lon"
+    } else {
+        Uri.encode(cleanAddress)
+    }
+
+    val navUri = Uri.parse("google.navigation:q=$navQuery&mode=d")
     val mapsAppIntent = Intent(Intent.ACTION_VIEW, navUri).apply {
         setPackage("com.google.android.apps.maps")
     }
     if (mapsAppIntent.resolveActivity(context.packageManager) != null) {
-        runCatching { context.startActivity(mapsAppIntent) }
-        return
+        return runCatching { context.startActivity(mapsAppIntent) }.isSuccess
     }
-    // Fallback strictly to Google Maps web directions (never third-party map apps)
+
+    // Standard Android geo: intent fallback (lets user open any installed maps app)
+    if (validCoords) {
+        val encodedLabel = Uri.encode(label.ifBlank { cleanAddress })
+        val geoUri = Uri.parse("geo:$lat,$lon?q=$lat,$lon($encodedLabel)")
+        val geoIntent = Intent(Intent.ACTION_VIEW, geoUri)
+        if (geoIntent.resolveActivity(context.packageManager) != null) {
+            return runCatching { context.startActivity(geoIntent) }.isSuccess
+        }
+    }
+
+    // Browser fallback to Google Maps driving directions (no API key required)
+    val webDestination = if (validCoords) "$lat,$lon" else Uri.encode(cleanAddress)
     val webUri = Uri.parse(
-        "https://www.google.com/maps/dir/?api=1&destination=$lat,$lon&travelmode=driving"
+        "https://www.google.com/maps/dir/?api=1&destination=$webDestination&travelmode=driving"
     )
-    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, webUri)) }
+    return runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, webUri)) }.isSuccess
 }
 
 fun launchDialer(context: Context, phone: String) {

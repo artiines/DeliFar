@@ -6,7 +6,13 @@ import com.delifar.app.data.JobStatus
 import com.delifar.app.data.StoreHoursEntity
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
-import com.delifar.app.network.GoogleRoutesClient
+import com.delifar.app.network.GeoPoint
+import com.delifar.app.network.GeoValidation
+import com.delifar.app.network.GeocodeSource
+import com.delifar.app.network.OsmRoutesClient
+import com.delifar.app.network.ParsedShareInput
+import com.delifar.app.network.ShareLocationParser
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -85,7 +91,6 @@ class DeliFarUnitTests {
             StoreHoursEntity("s1", 1, HoursMode.OPEN, "08:00-12:00;13:00-17:00"),
             StoreHoursEntity("s1", 7, HoursMode.CLOSED, "")
         )
-        // Monday 2026-06-15
         assertEquals(
             BusinessRules.HoursCheckResult.OK,
             BusinessRules.checkReceivingHours(hours, "2026-06-15", "09:30")
@@ -94,12 +99,10 @@ class DeliFarUnitTests {
             BusinessRules.HoursCheckResult.OUTSIDE_WINDOWS,
             BusinessRules.checkReceivingHours(hours, "2026-06-15", "12:30")
         )
-        // Sunday 2026-06-14
         assertEquals(
             BusinessRules.HoursCheckResult.CLOSED,
             BusinessRules.checkReceivingHours(hours, "2026-06-14", "10:00")
         )
-        // Tuesday 2026-06-16 (not configured -> UNKNOWN)
         assertEquals(
             BusinessRules.HoursCheckResult.UNKNOWN,
             BusinessRules.checkReceivingHours(hours, "2026-06-16", "10:00")
@@ -128,17 +131,91 @@ class DeliFarUnitTests {
     }
 
     @Test
-    fun googlePolylineDecoder_decodesStandardEncodedPolyline() {
-        // Canonical Google Maps encoded polyline example: (38.5, -120.2), (40.7, -120.95), (43.252, -126.453)
+    fun geoValidation_validatesCoordinatesAndEndpointSecurity() {
+        // Real Glendale, CA coordinates
+        assertTrue(GeoValidation.isValidCoordinate(34.1425, -118.2551))
+        // Reject Null Island, NaN, Infinite, out-of-range
+        assertFalse(GeoValidation.isValidCoordinate(0.0, 0.0))
+        assertFalse(GeoValidation.isValidCoordinate(Double.NaN, -118.2551))
+        assertFalse(GeoValidation.isValidCoordinate(91.0, -118.2551))
+        assertFalse(GeoValidation.isValidCoordinate(34.1425, 181.0))
+
+        // Public HTTPS endpoints allowed; HTTP, localhost, private IPs, embedded credentials rejected
+        assertTrue(GeoValidation.isSafeHttpsEndpointUrl("https://tiles.openfreemap.org/styles/liberty"))
+        assertTrue(GeoValidation.isSafeHttpsEndpointUrl("https://nominatim.openstreetmap.org"))
+        assertFalse(GeoValidation.isSafeHttpsEndpointUrl("http://nominatim.openstreetmap.org"))
+        assertFalse(GeoValidation.isSafeHttpsEndpointUrl("https://localhost:8080/search"))
+        assertFalse(GeoValidation.isSafeHttpsEndpointUrl("https://127.0.0.1/search"))
+        assertFalse(GeoValidation.isSafeHttpsEndpointUrl("https://192.168.1.50/search"))
+        assertFalse(GeoValidation.isSafeHttpsEndpointUrl("https://10.0.0.2/search"))
+        assertFalse(GeoValidation.isSafeHttpsEndpointUrl("https://169.254.169.254/latest/meta-data"))
+        assertFalse(GeoValidation.isSafeHttpsEndpointUrl("https://user:pass@nominatim.openstreetmap.org"))
+    }
+
+    @Test
+    fun shareLocationParser_parsesCoordsAndGoogleMapsUrlsSafely() {
+        // 1. Raw coordinates paste
+        val raw = ShareLocationParser.parseLocal("34.1425, -118.2551")
+        assertTrue(raw is ParsedShareInput.ExactLocation)
+        val rawLoc = raw as ParsedShareInput.ExactLocation
+        assertEquals(34.1425, rawLoc.lat, 0.0001)
+        assertEquals(-118.2551, rawLoc.lon, 0.0001)
+        assertEquals(GeocodeSource.PASTED_COORDS, rawLoc.source)
+
+        // 2. Full Google Maps place URL prefers exact !3d!4d pin over viewport @lat,lon
+        val fullUrl = "https://www.google.com/maps/place/1100+S+Brand+Blvd,+Glendale,+CA+91204/@34.0522,-118.2437,15z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d34.1329!4d-118.2551"
+        val parsedPin = ShareLocationParser.parseLocal(fullUrl)
+        assertTrue(parsedPin is ParsedShareInput.ExactLocation)
+        val pinLoc = parsedPin as ParsedShareInput.ExactLocation
+        assertEquals(34.1329, pinLoc.lat, 0.0001)
+        assertEquals(-118.2551, pinLoc.lon, 0.0001)
+
+        // 3. Google Maps search URL without coords extracts address query
+        val queryUrl = "https://www.google.com/maps/search/?api=1&query=200+N+Brand+Blvd%2C+Glendale%2C+CA"
+        val parsedQuery = ShareLocationParser.parseLocal(queryUrl)
+        assertTrue(parsedQuery is ParsedShareInput.AddressQuery)
+        assertEquals("200 N Brand Blvd, Glendale, CA", (parsedQuery as ParsedShareInput.AddressQuery).query)
+
+        // 4. Short link allowlist accepts https://maps.app.goo.gl only; rejects arbitrary shorteners & HTTP
+        assertNotNull(ShareLocationParser.isAllowedShortGoogleMapsLink("https://maps.app.goo.gl/abc123XYZ"))
+        assertNull(ShareLocationParser.isAllowedShortGoogleMapsLink("http://maps.app.goo.gl/abc123XYZ"))
+        assertNull(ShareLocationParser.isAllowedShortGoogleMapsLink("https://bit.ly/3xyz"))
+        assertNull(ShareLocationParser.parseLocal("https://evil.example.com/maps/@34.14,-118.25"))
+    }
+
+    @Test
+    fun osmRoutesClient_decodesPolylineAndOrdersOfflineStops() = runTest {
+        val client = OsmRoutesClient()
+        // Canonical Polyline5 test vector
         val encoded = "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
-        val pts = GoogleRoutesClient().decodePolyline(encoded)
-        assertNotNull(pts)
+        val pts = client.decodePolyline(encoded)
         assertEquals(3, pts.size)
-        assertEquals(38.5, pts[0].latitude, 0.001)
-        assertEquals(-120.2, pts[0].longitude, 0.001)
-        assertEquals(40.7, pts[1].latitude, 0.001)
-        assertEquals(-120.95, pts[1].longitude, 0.001)
-        assertEquals(43.252, pts[2].latitude, 0.001)
-        assertEquals(-126.453, pts[2].longitude, 0.001)
+        assertEquals(38.5, pts[0].lat, 0.001)
+        assertEquals(-120.2, pts[0].lon, 0.001)
+        assertEquals(40.7, pts[1].lat, 0.001)
+        assertEquals(-120.95, pts[1].lon, 0.001)
+        assertEquals(43.252, pts[2].lat, 0.001)
+        assertEquals(-126.453, pts[2].lon, 0.001)
+
+        // Offline nearest-neighbor ordering when no external OSRM URL is configured
+        val stops = listOf(
+            GeoPoint(34.1425, -118.2551), // Start: Glendale
+            GeoPoint(34.1808, -118.3090), // Farther: Burbank
+            GeoPoint(34.1478, -118.2480), // Closer to start: Glendale East
+            GeoPoint(34.1684, -118.6059)  // End: Woodland Hills
+        )
+        val res = client.computeRoute(stops, routingBaseUrl = "", optimizeIntermediates = true)
+        assertTrue(res.isSuccess)
+        val route = res.getOrThrow()
+        assertFalse(route.isStreetRoute)
+        assertEquals(listOf(0, 2, 1, 3), route.optimizedStopIndices)
+        assertTrue(route.distanceMeters > 0)
+
+        // Rejects fewer than 2 valid stops (including Null Island filtering)
+        val invalid = client.computeRoute(
+            listOf(GeoPoint(34.1425, -118.2551), GeoPoint(0.0, 0.0)),
+            routingBaseUrl = ""
+        )
+        assertTrue(invalid.isFailure)
     }
 }

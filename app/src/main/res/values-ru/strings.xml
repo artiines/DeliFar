@@ -36,8 +36,7 @@
     <string name="sync_failed">Ошибка загрузки (%1$d) — повторить</string>
     <string name="sync_offline_mode">Офлайн-режим</string>
     <string name="sync_now">Синхронизировать</string>
-    <string name="maps_quota_warning">Достигнут дневной лимит Google Maps. Часть запросов карт и маршрутов ограничена.</string>
-    <string name="maps_quota_learn_more">О лимите</string>
+    <string name="reset_defaults">Сбросить</string>
 
     <string name="account_and_company">Аккаунт и компания</string>
     <string name="sign_in">Войти</string>
@@ -105,14 +104,31 @@
     <string name="search_stores_hint">Фильтр магазинов…</string>
     <string name="area_la">Лос-Анджелес</string>
     <string name="area_sac">Сакраменто</string>
-    <string name="places_search_hint">Поиск компании или адреса в Google</string>
-    <string name="places_searching">Поиск в Google Places…</string>
-    <string name="places_no_results">В этой области ничего не найдено.</string>
-    <string name="places_attribution">Powered by Google</string>
-    <string name="duplicate_store_warning">Магазин с этим Google Place уже сохранён.</string>
+    <string name="places_search_hint">Поиск компании или адреса (OSM / Геокодер)</string>
+    <string name="places_searching">Поиск адресов…</string>
+    <string name="places_no_results">Ничего не найдено. Введите название и полный адрес выше или нажмите на карту.</string>
+    <string name="places_attribution">Данные © OpenStreetMap • MapLibre и OpenFreeMap</string>
+    <string name="duplicate_store_warning">Магазин с этим местом уже сохранён в компании.</string>
+    <string name="duplicate_manual_store_warning">Магазин с таким названием и адресом уже сохранён.</string>
+    <string name="store_details_section">Название и адрес магазина</string>
     <string name="store_name">Название магазина</string>
+    <string name="store_name_placeholder">Любое название магазина (сохранится точно как введено)</string>
     <string name="store_address">Полный адрес</string>
+    <string name="store_address_placeholder">Улица, город, штат (или вставьте координаты / ссылку Google Maps)</string>
     <string name="store_phone">Телефон (необязательно)</string>
+    <string name="locate_address">Найти адрес</string>
+    <string name="locating_address">Поиск координат…</string>
+    <string name="select_matching_location">Найдено несколько адресов (%1$d) — выберите нужный:</string>
+    <string name="confirm_pin_title">Точка на карте</string>
+    <string name="tap_map_to_adjust_pin">Проверьте метку ниже. Нажмите на карту для ручной корректировки, затем нажмите «Подтвердить точку».</string>
+    <string name="confirm_location">Подтвердить точку</string>
+    <string name="location_confirmed_badge">Подтверждено</string>
+    <string name="location_unconfirmed_badge">Подтвердите метку</string>
+    <string name="location_missing_badge">Метка не задана</string>
+    <string name="no_pin_yet_hint">Нажмите «Найти адрес» выше или нажмите прямо на карту, чтобы поставить метку.</string>
+    <string name="confirm_location_required">Найдите адрес (или поставьте метку на карте) и нажмите «Подтвердить точку» перед сохранением.</string>
+    <string name="optional_directory_search">Необязательно: поиск по названию в справочнике</string>
+    <string name="invalid_store_coordinates">У магазина нет подтверждённых координат. Откройте редактирование и подтвердите метку.</string>
     <string name="receiving_hours">Часы приёмки</string>
     <string name="hours_unknown">Неизвестно</string>
     <string name="hours_closed">Закрыто</string>
@@ -121,7 +137,7 @@
     <string name="archive_store">В архив</string>
     <string name="restore_store">Восстановить</string>
     <string name="archive_blocked_active_jobs">Завершите или отмените активные задачи магазина перед архивацией.</string>
-    <string name="directions">Google Карты</string>
+    <string name="directions">Маршрут</string>
     <string name="call_store">Позвонить</string>
 
     <string name="day_mon">Пн</string>
@@ -204,8 +220,8 @@
     <string name="map_list_view">Список</string>
     <string name="map_canvas_view">Карта</string>
     <string name="map_optimize_route">Оптимизировать маршрут</string>
-    <string name="map_traffic">Пробки</string>
-    <string name="map_satellite">Спутник</string>
+    <string name="map_style_toggle">Сменить стиль карты</string>
+    <string name="map_attribution">© OpenFreeMap • © OpenStreetMap</string>
     <string name="map_jobs_at_store">Задач в магазине: %1$d</string>
 
     <string name="schedule_title">Расписание</string>
@@ -241,6 +257,12 @@
     <string name="import_replace_conflicts">Заменять конфликтующие записи</string>
     <string name="import_restore_prefs">Восстановить настройки из копии</string>
     <string name="import_apply">Применить слияние</string>
+    <string name="settings_mapping_services">Карты, геокодирование и маршруты</string>
+    <string name="settings_mapping_policy_note">Использует MapLibre с OpenFreeMap и встроенный Android Geocoder без платных API. Для высокой нагрузки укажите собственный HTTPS-сервер Nominatim / OSRM.</string>
+    <string name="settings_map_style_url">URL стиля карты (HTTPS)</string>
+    <string name="settings_allow_osm_fallback">Резервный геокодер OSM</string>
+    <string name="settings_geocoding_url">URL сервера геокодирования (Nominatim HTTPS)</string>
+    <string name="settings_routing_url">URL сервера маршрутизации (OSRM HTTPS, необяз.)</string>
     <string name="settings_about">О DeliFar 2.0</string>
-    <string name="about_text">Облачная платформа для управления доставками, заборами и подписанием накладных на базе Google Firebase и Google Maps Platform.</string>
+    <string name="about_text">Платформа для управления доставками, заборами и подписанием накладных с MapLibre, OpenFreeMap, OpenStreetMap и Firebase.</string>
 </resources>

@@ -33,12 +33,13 @@ import com.delifar.app.documents.SignedPdfGenerator
 import com.delifar.app.domain.BackupManager
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.ImportPreview
+import com.delifar.app.network.AddressGeocoderService
 import com.delifar.app.network.ComputedRouteResult
-import com.delifar.app.network.GooglePlacesClient
-import com.delifar.app.network.GoogleRoutesClient
-import com.delifar.app.network.PlaceSearchResult
+import com.delifar.app.network.GeoPoint
+import com.delifar.app.network.GeoValidation
+import com.delifar.app.network.GeocodeCandidate
+import com.delifar.app.network.OsmRoutesClient
 import com.delifar.app.reminders.ReminderScheduler
-import com.google.android.gms.maps.model.LatLng
 import com.google.firebase.auth.UserProfileChangeRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -49,8 +50,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -58,7 +61,7 @@ import kotlinx.coroutines.withContext
 
 data class PlaceSearchUiState(
     val loading: Boolean = false,
-    val results: List<PlaceSearchResult> = emptyList(),
+    val results: List<GeocodeCandidate> = emptyList(),
     val error: String? = null,
     val searched: Boolean = false
 )
@@ -77,58 +80,57 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     val backupManager = BackupManager(db)
     val syncManager = CloudSyncManager(appContext, db, repository)
 
-    private val _mapsQuotaExceeded = MutableStateFlow(false)
-    val mapsQuotaExceeded: StateFlow<Boolean> = _mapsQuotaExceeded.asStateFlow()
-
-    val placesClient = GooglePlacesClient(
-        repository = repository,
-        onQuotaExceeded = { _mapsQuotaExceeded.value = true }
-    )
-    val routesClient = GoogleRoutesClient(
-        onQuotaExceeded = { _mapsQuotaExceeded.value = true }
-    )
+    val geocoderService = AddressGeocoderService(appContext, repository)
+    val routesClient = OsmRoutesClient()
 
     val preferences: StateFlow<AppPreferences> = repository.observePreferences()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppPreferences())
 
-    val stores: StateFlow<List<StoreWithHours>> = repository.observeStores()
+    private val activeCompanyIdFlow = preferences.map { it.activeCompanyId }.distinctUntilChanged()
+
+    val stores: StateFlow<List<StoreWithHours>> = activeCompanyIdFlow
+        .flatMapLatest { companyId -> repository.observeStores(companyId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val jobRows: StateFlow<List<JobListRow>> = repository.observeAllJobRows()
+    val jobRows: StateFlow<List<JobListRow>> = activeCompanyIdFlow
+        .flatMapLatest { companyId -> repository.observeJobRows(companyId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val invoices: StateFlow<List<InvoiceWithPages>> = repository.observeAllInvoices()
+    val invoices: StateFlow<List<InvoiceWithPages>> = activeCompanyIdFlow
+        .flatMapLatest { companyId -> repository.observeInvoices(companyId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val latestDraft: StateFlow<DraftEntity?> = repository.observeLatestDraft()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    val activeCompany: StateFlow<CompanyEntity?> = preferences
-        .flatMapLatest { p ->
-            if (p.activeCompanyId.isBlank()) flowOf(null) else repository.observeCompany(p.activeCompanyId)
+    val activeCompany: StateFlow<CompanyEntity?> = activeCompanyIdFlow
+        .flatMapLatest { companyId ->
+            if (companyId.isBlank()) flowOf(null) else repository.observeCompany(companyId)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    val employees: StateFlow<List<EmployeeEntity>> = preferences
-        .flatMapLatest { p ->
-            if (p.activeCompanyId.isBlank()) flowOf(emptyList()) else repository.observeEmployees(p.activeCompanyId)
+    val employees: StateFlow<List<EmployeeEntity>> = activeCompanyIdFlow
+        .flatMapLatest { companyId ->
+            if (companyId.isBlank()) flowOf(emptyList()) else repository.observeEmployees(companyId)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val invitations: StateFlow<List<InvitationEntity>> = preferences
-        .flatMapLatest { p ->
-            if (p.activeCompanyId.isBlank()) flowOf(emptyList()) else repository.observeInvitations(p.activeCompanyId)
+    val invitations: StateFlow<List<InvitationEntity>> = activeCompanyIdFlow
+        .flatMapLatest { companyId ->
+            if (companyId.isBlank()) flowOf(emptyList()) else repository.observeInvitations(companyId)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val auditLogs: StateFlow<List<AuditLogEntity>> = preferences
-        .flatMapLatest { p -> repository.observeAuditLogs(p.activeCompanyId) }
+    val auditLogs: StateFlow<List<AuditLogEntity>> = activeCompanyIdFlow
+        .flatMapLatest { companyId -> repository.observeAuditLogs(companyId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val pendingSyncCount: StateFlow<Int> = repository.observePendingSyncCount()
+    val pendingSyncCount: StateFlow<Int> = activeCompanyIdFlow
+        .flatMapLatest { companyId -> repository.observePendingSyncCount(companyId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
-    val failedSyncCount: StateFlow<Int> = repository.observeFailedSyncCount()
+    val failedSyncCount: StateFlow<Int> = activeCompanyIdFlow
+        .flatMapLatest { companyId -> repository.observeFailedSyncCount(companyId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     val syncState: StateFlow<CloudSyncUiState> = syncManager.syncState
@@ -168,13 +170,10 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         super.onCleared()
     }
 
-    fun dismissMapsQuotaWarning() {
-        _mapsQuotaExceeded.value = false
-    }
-
     fun observeStore(storeId: String): Flow<StoreWithHours?> = repository.observeStore(storeId)
     fun observeJob(jobId: String): Flow<JobWithItems?> = repository.observeJobWithItems(jobId)
-    fun observeInvoicesForJob(jobId: String): Flow<List<InvoiceWithPages>> = repository.observeInvoicesForJob(jobId)
+    fun observeInvoicesForJob(jobId: String): Flow<List<InvoiceWithPages>> =
+        repository.observeInvoicesForJob(jobId, preferences.value.activeCompanyId)
     fun observeInvoice(invoiceId: String): Flow<InvoiceWithPages?> = repository.observeInvoice(invoiceId)
 
     fun notifyMessage(msg: String) {
@@ -189,10 +188,11 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
 
     fun triggerSyncNow() {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.retryFailedSyncItems()
+            val activeCompanyId = preferences.value.activeCompanyId
+            repository.retryFailedSyncItems(activeCompanyId)
             CloudSyncManager.scheduleBackgroundSync(appContext)
             if (FirebaseServices.isConfigured) {
-                val ok = syncManager.flushPendingQueue()
+                val ok = syncManager.flushPendingQueue(activeCompanyId)
                 notifyMessage(if (ok) "Cloud sync complete." else "Sync queued — will retry automatically when online.")
             } else {
                 notifyMessage("Saved locally. Add google-services.json to enable live Firebase cloud sync.")
@@ -240,9 +240,14 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             syncManager.stopListeners()
             runCatching { FirebaseServices.authOrNull()?.signOut() }
+            repository.setPreference(PrefKeys.ACTIVE_COMPANY_ID, "")
             repository.setPreference(PrefKeys.ACTIVE_USER_UID, "")
             repository.setPreference(PrefKeys.ACTIVE_USER_EMAIL, "")
             repository.setPreference(PrefKeys.ACTIVE_USER_NAME, "")
+            repository.setPreference(PrefKeys.ACTIVE_USER_ROLE, EmployeeRole.OWNER)
+            clearSearchState()
+            clearRoutePlan()
+            rebuildReminders()
             notifyMessage("Signed out.")
         }
     }
@@ -400,45 +405,63 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // --- Google Places API (New) & Google Routes API ---
+    // --- Free Geocoding (Android Geocoder + Configurable OSM) & OSRM Routing ---
 
     fun clearSearchState() {
         _searchState.value = PlaceSearchUiState()
     }
 
+    suspend fun locateStoreAddress(rawAddress: String, area: String): com.delifar.app.network.GeocodeOutcome {
+        val p = preferences.value
+        return geocoderService.locateAddress(
+            rawAddress = rawAddress,
+            area = area,
+            languageTag = p.language,
+            osmBaseUrl = p.geocodingUrl,
+            allowOsmFallback = p.allowOsmFallback
+        )
+    }
+
     fun searchPlaces(query: String, area: String) {
         viewModelScope.launch {
             _searchState.value = PlaceSearchUiState(loading = true)
-            val result = placesClient.search(query, area, preferences.value.language)
-            result.fold(
-                onSuccess = { list ->
-                    _searchState.value = PlaceSearchUiState(loading = false, results = list, searched = true)
-                },
-                onFailure = { err ->
-                    _searchState.value = PlaceSearchUiState(
-                        loading = false,
-                        error = err.message ?: "Search failed",
-                        searched = true
-                    )
-                }
+            val p = preferences.value
+            val outcome = geocoderService.searchDirectory(
+                query = query,
+                area = area,
+                languageTag = p.language,
+                osmBaseUrl = p.geocodingUrl,
+                allowOsmFallback = p.allowOsmFallback
+            )
+            _searchState.value = PlaceSearchUiState(
+                loading = false,
+                results = outcome.candidates,
+                error = outcome.errorMessage,
+                searched = true
             )
         }
     }
 
-    fun optimizeRouteForStops(stops: List<LatLng>) {
-        if (stops.size < 2) {
-            notifyMessage("Need at least 2 stops on the map to optimize a driving route.")
+    fun optimizeRouteForStops(stops: List<GeoPoint>) {
+        val validStops = stops.filter { it.isValid() }
+        if (validStops.size < 2) {
+            notifyMessage("Need at least 2 stores with confirmed locations to optimize a route.")
             return
         }
         viewModelScope.launch {
             _routeState.value = RoutePlanUiState(loading = true)
-            val result = routesClient.computeRoute(stops, optimizeIntermediates = true)
+            val result = routesClient.computeRoute(
+                stops = validStops,
+                routingBaseUrl = preferences.value.routingUrl,
+                optimizeIntermediates = true
+            )
             result.fold(
                 onSuccess = { computed ->
                     _routeState.value = RoutePlanUiState(loading = false, route = computed)
                     val miles = computed.distanceMeters / 1609.34
                     val mins = computed.durationSeconds / 60
-                    notifyMessage("Google route ready: %.1f mi • %d min".format(miles, mins))
+                    val prefix = if (computed.isStreetRoute) "Street route ready" else "Offline stop order"
+                    notifyMessage("$prefix: %.1f mi • %d min".format(miles, mins))
                 },
                 onFailure = { err ->
                     _routeState.value = RoutePlanUiState(loading = false, error = err.message)
@@ -452,6 +475,34 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         _routeState.value = RoutePlanUiState()
     }
 
+    suspend fun updateMappingSettings(
+        geocodingUrl: String,
+        routingUrl: String,
+        mapStyleUrl: String,
+        allowOsmFallback: Boolean
+    ): Result<Unit> {
+        val cleanGeo = geocodingUrl.trim()
+        val cleanRoute = routingUrl.trim()
+        val cleanStyle = mapStyleUrl.trim().ifBlank { AppPreferences.DEFAULT_MAP_STYLE_URL }
+
+        if (cleanGeo.isNotEmpty() && !GeoValidation.isSafeHttpsEndpointUrl(cleanGeo)) {
+            return Result.failure(IllegalArgumentException("Geocoding URL must be a valid public HTTPS URL."))
+        }
+        if (cleanRoute.isNotEmpty() && !GeoValidation.isSafeHttpsEndpointUrl(cleanRoute)) {
+            return Result.failure(IllegalArgumentException("Routing URL must be blank or a valid public HTTPS URL."))
+        }
+        if (!GeoValidation.isSafeHttpsEndpointUrl(cleanStyle)) {
+            return Result.failure(IllegalArgumentException("Map style URL must be a valid public HTTPS URL."))
+        }
+
+        repository.setPreference(PrefKeys.GEOCODING_URL, cleanGeo)
+        repository.setPreference(PrefKeys.ROUTING_URL, cleanRoute)
+        repository.setPreference(PrefKeys.MAP_STYLE_URL, cleanStyle)
+        repository.setPreference(PrefKeys.ALLOW_OSM_FALLBACK, allowOsmFallback.toString())
+        notifyMessage("Map & geocoding settings saved.")
+        return Result.success(Unit)
+    }
+
     // --- Stores ---
 
     suspend fun saveStore(
@@ -462,7 +513,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         lon: Double,
         providerId: String?,
         phone: String,
-        hours: List<StoreHoursEntity>
+        hours: List<StoreHoursEntity>,
+        locationConfirmed: Boolean = true,
+        geocodeSource: String = "manual"
     ): Result<StoreEntity> {
         val p = preferences.value
         val res = repository.saveStore(
@@ -477,7 +530,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             companyId = p.activeCompanyId,
             actorUid = p.activeUserUid,
             actorName = p.activeUserName,
-            actorRole = p.activeUserRole
+            actorRole = p.activeUserRole,
+            locationConfirmed = locationConfirmed,
+            geocodeSource = geocodeSource
         )
         if (res.isSuccess) {
             CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -799,9 +854,10 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
 
     fun exportBackupToUri(uri: Uri) {
         viewModelScope.launch {
+            val activeCompanyId = preferences.value.activeCompanyId
             val res = withContext(Dispatchers.IO) {
                 runCatching {
-                    val json = backupManager.exportJson()
+                    val json = backupManager.exportJson(activeCompanyId)
                     appContext.contentResolver.openOutputStream(uri)?.use { out ->
                         out.write(json.toByteArray(Charsets.UTF_8))
                     } ?: throw IllegalStateException("Cannot open destination file.")
@@ -816,6 +872,7 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
 
     fun inspectImportUri(uri: Uri) {
         viewModelScope.launch {
+            val activeCompanyId = preferences.value.activeCompanyId
             val res = withContext(Dispatchers.IO) {
                 runCatching {
                     val bytes = appContext.contentResolver.openInputStream(uri)?.use { input ->
@@ -826,7 +883,7 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
                         data
                     } ?: throw IllegalStateException("Cannot read selected file.")
                     val parsed = backupManager.parseAndValidate(String(bytes, Charsets.UTF_8)).getOrThrow()
-                    backupManager.buildPreview(parsed)
+                    backupManager.buildPreview(parsed, activeCompanyId)
                 }
             }
             res.fold(

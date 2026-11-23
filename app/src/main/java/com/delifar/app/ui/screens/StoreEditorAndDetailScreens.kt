@@ -21,11 +21,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -48,7 +51,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,10 +59,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
+import com.delifar.app.data.AppPreferences
 import com.delifar.app.data.HoursMode
 import com.delifar.app.data.JobListRow
 import com.delifar.app.data.SearchArea
@@ -67,15 +72,26 @@ import com.delifar.app.data.StoreHoursEntity
 import com.delifar.app.data.StoreWithHours
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
+import com.delifar.app.network.GeoPoint
+import com.delifar.app.network.GeoValidation
+import com.delifar.app.network.GeocodeCandidate
+import com.delifar.app.network.GeocodeSource
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.JobCard
+import com.delifar.app.ui.components.StatusTag
+import com.delifar.app.ui.components.StorePinPickerMap
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.launchDialer
 import com.delifar.app.ui.components.launchDirections
 import com.delifar.app.ui.components.weekdayShortLabel
+import com.delifar.app.ui.theme.AmberAccent
+import com.delifar.app.ui.theme.AmberContainer
+import com.delifar.app.ui.theme.SuccessContainer
+import com.delifar.app.ui.theme.SuccessGreen
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -95,9 +111,18 @@ fun StoreEditorScreen(
     var name by remember { mutableStateOf("") }
     var address by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
-    var lat by remember { mutableDoubleStateOf(if (prefs.area == SearchArea.SAC) 38.5816 else 34.0522) }
-    var lon by remember { mutableDoubleStateOf(if (prefs.area == SearchArea.SAC) -121.4944 else -118.2437) }
+
+    // CRITICAL: New stores start with NULL coordinates (never silent default Los Angeles coordinates!)
+    var pin by remember { mutableStateOf<GeoPoint?>(null) }
+    var locationConfirmed by remember { mutableStateOf(false) }
+    var geocodeSource by remember { mutableStateOf(GeocodeSource.MANUAL_PIN) }
     var providerId by remember { mutableStateOf<String?>(null) }
+
+    var locatingAddress by remember { mutableStateOf(false) }
+    var locateCandidates by remember { mutableStateOf<List<GeocodeCandidate>>(emptyList()) }
+    var locateError by remember { mutableStateOf<String?>(null) }
+    var cameraFocusNonce by remember { mutableIntStateOf(0) }
+
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
 
@@ -111,8 +136,12 @@ fun StoreEditorScreen(
                 name = existing.store.name
                 address = existing.store.address
                 phone = existing.store.phone
-                lat = existing.store.lat
-                lon = existing.store.lon
+                if (GeoValidation.isValidCoordinate(existing.store.lat, existing.store.lon)) {
+                    pin = GeoPoint(existing.store.lat, existing.store.lon)
+                    locationConfirmed = existing.store.locationConfirmed
+                    cameraFocusNonce++
+                }
+                geocodeSource = existing.store.geocodeSource
                 providerId = existing.store.providerId
                 (1..7).forEach { d ->
                     val h = existing.hours.find { it.day == d }
@@ -127,7 +156,37 @@ fun StoreEditorScreen(
         onDispose { viewModel.clearSearchState() }
     }
 
-    val duplicateWarn = lStr(R.string.duplicate_store_warning)
+    val viewportCenter = remember(area) {
+        if (area == SearchArea.SAC) GeoPoint(38.5816, -121.4944) else GeoPoint(34.0522, -118.2437)
+    }
+
+    val duplicateProviderWarn = lStr(R.string.duplicate_store_warning)
+    val duplicateStoreWarn = lStr(R.string.duplicate_manual_store_warning)
+    val unconfirmedWarn = lStr(R.string.confirm_location_required)
+
+    fun applyCandidate(candidate: GeocodeCandidate, allowFillBlankName: Boolean) {
+        // NEVER overwrite a custom store name the user already typed!
+        if (allowFillBlankName && name.isBlank() && candidate.displayName.isNotBlank()) {
+            name = candidate.displayName
+        }
+        if (candidate.formattedAddress.isNotBlank()) {
+            // Only replace address if user came from directory search or pasted a link/coords
+            if (allowFillBlankName || address.contains("http", ignoreCase = true) || address.trim().matches(Regex("^-?\\d+\\.\\d+.*"))) {
+                address = candidate.formattedAddress
+            }
+        }
+        if (candidate.phone.isNotBlank() && phone.isBlank()) {
+            phone = candidate.phone
+        }
+        pin = GeoPoint(candidate.lat, candidate.lon)
+        geocodeSource = candidate.source
+        providerId = candidate.id.takeIf { it.startsWith("osm:") }
+        // Require explicit user confirmation after reviewing pin on the interactive map
+        locationConfirmed = false
+        locateError = null
+        errorMsg = null
+        cameraFocusNonce++
+    }
 
     Scaffold(
         topBar = {
@@ -154,7 +213,7 @@ fun StoreEditorScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Google Places API (New) Search Section
+            // 1. Custom Store Name & Full Street Address + "Locate Address" (Primary Workflow)
             item {
                 Card(
                     shape = RoundedCornerShape(14.dp),
@@ -165,31 +224,292 @@ fun StoreEditorScreen(
                         modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        Text(
+                            text = lStr(R.string.store_details_section),
+                            style = MaterialTheme.typography.titleMedium
+                        )
+
+                        // Area bias chips (used only to bias geocoder & initial map viewport — NEVER sets store coords)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             FilterChip(
                                 selected = area == SearchArea.LA,
-                                onClick = {
-                                    area = SearchArea.LA
-                                    if (existingStoreId == null && providerId == null) {
-                                        lat = 34.0522
-                                        lon = -118.2437
-                                    }
-                                },
+                                onClick = { area = SearchArea.LA },
                                 label = { Text(lStr(R.string.area_la)) }
                             )
                             FilterChip(
                                 selected = area == SearchArea.SAC,
-                                onClick = {
-                                    area = SearchArea.SAC
-                                    if (existingStoreId == null && providerId == null) {
-                                        lat = 38.5816
-                                        lon = -121.4944
-                                    }
-                                },
+                                onClick = { area = SearchArea.SAC },
                                 label = { Text(lStr(R.string.area_sac)) }
                             )
                         }
 
+                        OutlinedTextField(
+                            value = name,
+                            onValueChange = { name = it; errorMsg = null },
+                            label = { Text(lStr(R.string.store_name)) },
+                            placeholder = { Text(lStr(R.string.store_name_placeholder)) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        OutlinedTextField(
+                            value = address,
+                            onValueChange = {
+                                address = it
+                                // Editing address invalidates previous confirmation so stale pins cannot be saved
+                                locationConfirmed = false
+                                locateError = null
+                                errorMsg = null
+                            },
+                            label = { Text(lStr(R.string.store_address)) },
+                            placeholder = { Text(lStr(R.string.store_address_placeholder)) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Button(
+                            onClick = {
+                                if (locatingAddress) return@Button
+                                locatingAddress = true
+                                locateError = null
+                                locateCandidates = emptyList()
+                                errorMsg = null
+                                scope.launch {
+                                    val outcome = viewModel.locateStoreAddress(address, area)
+                                    locatingAddress = false
+                                    if (outcome.candidates.isNotEmpty()) {
+                                        locateCandidates = outcome.candidates
+                                        // Preview first candidate immediately while letting user pick another if multiple
+                                        applyCandidate(outcome.candidates.first(), allowFillBlankName = false)
+                                    } else {
+                                        locateError = outcome.errorMessage
+                                            ?: "Could not find coordinates for this address. Tap the map below to place the pin manually."
+                                    }
+                                }
+                            },
+                            enabled = !locatingAddress && address.trim().length >= 3,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (locatingAddress) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(lStr(R.string.locating_address))
+                            } else {
+                                Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(lStr(R.string.locate_address))
+                            }
+                        }
+
+                        locateError?.let { err ->
+                            Surface(
+                                color = TerracottaContainer,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = err,
+                                    color = TerracottaError,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(10.dp)
+                                )
+                            }
+                        }
+
+                        // Multi-candidate selector if more than 1 location matched
+                        if (locateCandidates.size > 1) {
+                            Text(
+                                text = lStr(R.string.select_matching_location, locateCandidates.size),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            locateCandidates.forEach { cand ->
+                                val isCurrent = pin != null &&
+                                    kotlin.math.abs(pin!!.lat - cand.lat) < 0.00001 &&
+                                    kotlin.math.abs(pin!!.lon - cand.lon) < 0.00001
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isCurrent) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                    border = if (isCurrent) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            applyCandidate(cand, allowFillBlankName = false)
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            Icons.Default.LocationOn,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(cand.formattedAddress, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                                            Text(
+                                                "${sourceDisplayLabel(cand.source)} • ${"%.5f, %.5f".format(Locale.US, cand.lat, cand.lon)}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = phone,
+                            onValueChange = { phone = it },
+                            label = { Text(lStr(R.string.store_phone)) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            // 2. Interactive MapLibre Pin Verification & Manual Adjustment Card
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(
+                        width = if (locationConfirmed) 1.5.dp else 1.dp,
+                        color = if (locationConfirmed) SuccessGreen.copy(alpha = 0.7f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = lStr(R.string.confirm_pin_title),
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            StatusTag(
+                                text = if (locationConfirmed) lStr(R.string.location_confirmed_badge)
+                                else if (pin != null) lStr(R.string.location_unconfirmed_badge)
+                                else lStr(R.string.location_missing_badge),
+                                bg = if (locationConfirmed) SuccessContainer else AmberContainer,
+                                fg = if (locationConfirmed) SuccessGreen else AmberAccent
+                            )
+                        }
+
+                        Text(
+                            text = lStr(R.string.tap_map_to_adjust_pin),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        StorePinPickerMap(
+                            styleUrl = prefs.mapStyleUrl.ifBlank { AppPreferences.DEFAULT_MAP_STYLE_URL },
+                            pin = pin,
+                            confirmed = locationConfirmed,
+                            fallbackCenter = viewportCenter,
+                            cameraFocusNonce = cameraFocusNonce,
+                            onPinMoved = { movedPoint ->
+                                pin = movedPoint
+                                geocodeSource = GeocodeSource.MANUAL_PIN
+                                locationConfirmed = false
+                                locateError = null
+                                errorMsg = null
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(250.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                        )
+
+                        val currentPin = pin
+                        if (currentPin != null && currentPin.isValid()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${"%.5f".format(Locale.US, currentPin.lat)}, ${"%.5f".format(Locale.US, currentPin.lon)}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = sourceDisplayLabel(geocodeSource),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (!locationConfirmed) {
+                                    Button(
+                                        onClick = {
+                                            locationConfirmed = true
+                                            errorMsg = null
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(lStr(R.string.confirm_location))
+                                    }
+                                } else {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            tint = SuccessGreen,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            text = lStr(R.string.location_confirmed_badge),
+                                            color = SuccessGreen,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(Icons.Default.Warning, contentDescription = null, tint = AmberAccent, modifier = Modifier.size(16.dp))
+                                Text(
+                                    text = lStr(R.string.no_pin_yet_hint),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Optional OpenStreetMap / Device Directory Search (secondary convenience)
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = lStr(R.string.optional_directory_search),
+                            style = MaterialTheme.typography.titleSmall
+                        )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -235,15 +555,8 @@ fun StoreEditorScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
-                                        name = place.name
-                                        address = place.address
-                                        lat = place.lat
-                                        lon = place.lon
-                                        if (place.phone.isNotBlank() && phone.isBlank()) {
-                                            phone = place.phone
-                                        }
-                                        providerId = place.placeId
-                                        errorMsg = null
+                                        applyCandidate(place, allowFillBlankName = true)
+                                        locateCandidates = emptyList()
                                         viewModel.clearSearchState()
                                     }
                             ) {
@@ -259,9 +572,9 @@ fun StoreEditorScreen(
                                     )
                                     Spacer(Modifier.width(8.dp))
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(place.name, style = MaterialTheme.typography.titleMedium)
+                                        Text(place.displayName, style = MaterialTheme.typography.titleMedium)
                                         Text(
-                                            place.address,
+                                            place.formattedAddress,
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -279,33 +592,7 @@ fun StoreEditorScreen(
                 }
             }
 
-            item {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it; errorMsg = null },
-                    label = { Text(lStr(R.string.store_name)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                OutlinedTextField(
-                    value = address,
-                    onValueChange = { address = it; errorMsg = null },
-                    label = { Text(lStr(R.string.store_address)) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                OutlinedTextField(
-                    value = phone,
-                    onValueChange = { phone = it },
-                    label = { Text(lStr(R.string.store_phone)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
+            // 4. Receiving Hours
             item {
                 Text(
                     text = lStr(R.string.receiving_hours),
@@ -395,6 +682,11 @@ fun StoreEditorScreen(
                 Button(
                     onClick = {
                         if (saving) return@Button
+                        val currentPin = pin
+                        if (currentPin == null || !currentPin.isValid() || !locationConfirmed) {
+                            errorMsg = unconfirmedWarn
+                            return@Button
+                        }
                         saving = true
                         errorMsg = null
                         val hours = (1..7).map { d ->
@@ -410,20 +702,22 @@ fun StoreEditorScreen(
                                 existingId = existingStoreId,
                                 name = name,
                                 address = address,
-                                lat = lat,
-                                lon = lon,
+                                lat = currentPin.lat,
+                                lon = currentPin.lon,
                                 providerId = providerId,
                                 phone = phone,
-                                hours = hours
+                                hours = hours,
+                                locationConfirmed = locationConfirmed,
+                                geocodeSource = geocodeSource
                             )
                             saving = false
                             res.fold(
                                 onSuccess = { onSaved(it.id) },
                                 onFailure = { err ->
-                                    errorMsg = if (err.message == "DUPLICATE_PROVIDER") {
-                                        duplicateWarn
-                                    } else {
-                                        err.message ?: "Could not save store."
+                                    errorMsg = when (err.message) {
+                                        "DUPLICATE_PROVIDER" -> duplicateProviderWarn
+                                        "DUPLICATE_STORE" -> duplicateStoreWarn
+                                        else -> err.message ?: "Could not save store."
                                     }
                                 }
                             )
@@ -439,6 +733,15 @@ fun StoreEditorScreen(
             }
         }
     }
+}
+
+private fun sourceDisplayLabel(source: String): String = when (source) {
+    GeocodeSource.ANDROID_GEOCODER -> "Android Geocoder"
+    GeocodeSource.OSM_NOMINATIM -> "OpenStreetMap Geocoder"
+    GeocodeSource.PASTED_COORDS -> "Pasted Coordinates"
+    GeocodeSource.GOOGLE_MAPS_LINK -> "Google Maps Share Link"
+    GeocodeSource.MANUAL_PIN -> "Manual Map Pin"
+    else -> "Saved Location"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -461,6 +764,7 @@ fun StoreDetailScreen(
         BusinessRules.sortJobsForDay(allJobRows.filter { it.job.storeId == storeId })
     }
     val archiveBlockedMsg = lStr(R.string.archive_blocked_active_jobs)
+    val invalidCoordMsg = lStr(R.string.invalid_store_coordinates)
 
     Scaffold(
         topBar = {
@@ -520,6 +824,13 @@ fun StoreDetailScreen(
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (GeoValidation.isValidCoordinate(swh.store.lat, swh.store.lon)) {
+                            Text(
+                                text = "${"%.5f".format(Locale.US, swh.store.lat)}, ${"%.5f".format(Locale.US, swh.store.lon)} • ${sourceDisplayLabel(swh.store.geocodeSource)}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         if (swh.store.phone.isNotBlank()) {
                             Text(
                                 swh.store.phone,
@@ -530,7 +841,16 @@ fun StoreDetailScreen(
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
-                                onClick = { launchDirections(context, swh.store.lat, swh.store.lon, swh.store.name) },
+                                onClick = {
+                                    val ok = launchDirections(
+                                        context,
+                                        swh.store.lat,
+                                        swh.store.lon,
+                                        swh.store.name,
+                                        swh.store.address
+                                    )
+                                    if (!ok) viewModel.notifyMessage(invalidCoordMsg)
+                                },
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))

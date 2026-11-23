@@ -1,4 +1,4 @@
-# DeliFar 2.0 — Firebase & Google Maps Setup Guide
+# DeliFar 2.0 — Firebase & Free Mapping Setup Guide
 
 DeliFar 2.0 runs fully offline with Room/SQLite out of the box and automatically activates real-time cloud sync, multi-user authentication, private invoice storage, and push notifications as soon as your Firebase project configuration is connected.
 
@@ -9,7 +9,7 @@ DeliFar 2.0 runs fully offline with Room/SQLite out of the box and automatically
    ```
    app/google-services.json
    ```
-   (`app/build.gradle.kts` automatically detects and applies `com.google.gms.google-services` whenever `app/google-services.json` is present.)
+   (`app/build.gradle.kts` automatically detects and applies `com.google.gms.google-services` whenever `app/google-services.json` is present. `google-services.json` is gitignored and must never be committed.)
 
 ## 2. Enable Required Firebase Services
 In the Firebase Console, enable:
@@ -27,11 +27,14 @@ firebase deploy --only firestore:rules,firestore:indexes,storage
 cd functions && npm install && npm run build && cd ..
 firebase deploy --only functions
 ```
-> **Important**: Review `firestore.rules` and `storage.rules` before broad production rollout, and run `firestore.rules.test.ts` against the Firebase Emulator Suite to verify all role and multi-tenant isolation boundaries.
+> **Important**: Run `firestore.rules.test.ts` against the Firebase Emulator Suite before production rollout to verify company isolation, role enforcement, driver invoice isolation, signed-invoice immutability, and Storage rules.
 
-## 4. Google Maps Platform API Key & Restrictions
-DeliFar uses Google Maps Platform exclusively (**Maps SDK for Android**, **Places API (New)**, and **Routes API**).
-1. Ensure `GOOGLE_MAPS_API_KEY` is configured via `local.properties` or environment variable (see `.env.example`).
-2. In Google Cloud Console -> **APIs & Services -> Credentials**, restrict your Android API key by:
-   - **Application restriction**: Android apps (`com.delifar.app` + your release SHA-1 fingerprint).
-   - **API restrictions**: Maps SDK for Android, Places API (New), Routes API.
+## 4. Free Mapping, Geocoding & Routing (No Paid API Keys Required)
+DeliFar 2.0 uses a 100% free, zero-API-key mapping stack:
+- **Interactive Native Map**: MapLibre Native Android (`org.maplibre.gl:android-sdk`) rendering **OpenFreeMap** vector tiles (`https://tiles.openfreemap.org/styles/liberty` and `positron`).
+- **Address Geocoding**: Android built-in `Geocoder` first, with a policy-compliant, rate-limited (1.15s min interval, 7-day Room cache) OpenStreetMap Nominatim fallback.
+- **Route Ordering & Street Routing**: Built-in offline nearest-neighbor ordering by default, plus an optional configurable OSRM HTTPS endpoint for turn-by-turn street geometry.
+- **External Turn-by-Turn Navigation**: Hands off validated real store coordinates directly to the installed Google Maps app (or any geo-handler) via Android `Intent` — no Google Maps SDK or paid API keys required.
+
+### Production Business Traffic Recommendation
+Public demonstration services (such as public Nominatim or public OSRM) enforce strict usage policies and rate limits. For high-volume commercial dispatch, configure your own HTTPS endpoints in **Settings -> Mapping & Routing Services** (e.g., self-hosted OpenFreeMap/Protomaps tiles, self-hosted Nominatim/Pelias geocoder, and self-hosted OSRM routing server) without rebuilding the APK.

@@ -3,6 +3,7 @@ package com.delifar.app.data
 import androidx.room.withTransaction
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
+import com.delifar.app.network.GeoValidation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
@@ -45,17 +46,26 @@ class DeliFarRepository(
     fun observeEmployees(companyId: String): Flow<List<EmployeeEntity>> = employeeDao.observeByCompany(companyId)
     fun observeEmployee(uid: String): Flow<EmployeeEntity?> = employeeDao.observeByUid(uid)
     fun observeInvitations(companyId: String): Flow<List<InvitationEntity>> = invitationDao.observeByCompany(companyId)
-    fun observeStores(): Flow<List<StoreWithHours>> = storeDao.observeAllStoresWithHours()
+    fun observeStores(companyId: String): Flow<List<StoreWithHours>> =
+        storeDao.observeStoresWithHoursByCompany(companyId)
     fun observeStore(storeId: String): Flow<StoreWithHours?> = storeDao.observeStoreWithHours(storeId)
-    fun observeAllJobRows(): Flow<List<JobListRow>> = jobDao.observeAllJobRows()
+    fun observeJobRows(companyId: String): Flow<List<JobListRow>> =
+        jobDao.observeJobRowsByCompany(companyId)
     fun observeJobWithItems(jobId: String): Flow<JobWithItems?> = jobDao.observeJobWithItems(jobId)
-    fun observeAllInvoices(): Flow<List<InvoiceWithPages>> = invoiceDao.observeAllInvoicesWithPages()
-    fun observeInvoicesForJob(jobId: String): Flow<List<InvoiceWithPages>> = invoiceDao.observeInvoicesForJob(jobId)
+    fun observeInvoices(companyId: String): Flow<List<InvoiceWithPages>> =
+        invoiceDao.observeInvoicesWithPagesByCompany(companyId)
+    fun observeInvoicesForJob(jobId: String, companyId: String? = null): Flow<List<InvoiceWithPages>> =
+        if (companyId != null) invoiceDao.observeInvoicesForJobInCompany(companyId, jobId)
+        else invoiceDao.observeInvoicesForJob(jobId)
     fun observeInvoice(invoiceId: String): Flow<InvoiceWithPages?> = invoiceDao.observeInvoice(invoiceId)
     fun observeAuditLogs(companyId: String): Flow<List<AuditLogEntity>> =
-        if (companyId.isBlank()) auditLogDao.observeRecent() else auditLogDao.observeByCompany(companyId)
-    fun observePendingSyncCount(): Flow<Int> = syncQueueDao.observePendingCount()
-    fun observeFailedSyncCount(): Flow<Int> = syncQueueDao.observeFailedCount()
+        auditLogDao.observeByCompany(companyId)
+    fun observePendingSyncCount(companyId: String): Flow<Int> =
+        if (companyId.isBlank()) syncQueueDao.observePendingCountByCompany("")
+        else syncQueueDao.observePendingCountByCompany(companyId)
+    fun observeFailedSyncCount(companyId: String): Flow<Int> =
+        if (companyId.isBlank()) syncQueueDao.observeFailedCountByCompany("")
+        else syncQueueDao.observeFailedCountByCompany(companyId)
     fun observeLatestDraft(): Flow<DraftEntity?> = draftDao.observeLatestDraft()
 
     fun observePreferences(): Flow<AppPreferences> =
@@ -70,8 +80,8 @@ class DeliFarRepository(
         prefDao.upsert(PreferenceEntity(key, value))
     }
 
-    suspend fun findStoreByProviderId(providerId: String): StoreEntity? =
-        storeDao.findByProviderId(providerId)
+    suspend fun findStoreByProviderId(providerId: String, companyId: String = ""): StoreEntity? =
+        storeDao.findByProviderIdInCompany(companyId, providerId)
 
     suspend fun getStoreWithHours(storeId: String): StoreWithHours? =
         storeDao.getStoreWithHours(storeId)
@@ -435,7 +445,9 @@ class DeliFarRepository(
         companyId: String = "",
         actorUid: String = "",
         actorName: String = "",
-        actorRole: String = EmployeeRole.OWNER
+        actorRole: String = EmployeeRole.OWNER,
+        locationConfirmed: Boolean = true,
+        geocodeSource: String = "manual"
     ): Result<StoreEntity> {
         if (!RolePermissions.canManageStoresAndJobs(actorRole)) {
             return Result.failure(SecurityException("Only Owners and Managers can add or edit stores."))
@@ -443,22 +455,34 @@ class DeliFarRepository(
         val trimmedName = name.trim()
         val trimmedAddress = address.trim()
         if (trimmedName.isEmpty() || trimmedAddress.isEmpty()) {
-            return Result.failure(IllegalArgumentException("Store name and address are required."))
+            return Result.failure(IllegalArgumentException("Store name and full street address are required."))
         }
-        if (!lat.isFinite() || !lon.isFinite() || lat !in -90.0..90.0 || lon !in -180.0..180.0) {
-            return Result.failure(IllegalArgumentException("Valid coordinates are required."))
+        if (!locationConfirmed) {
+            return Result.failure(
+                IllegalArgumentException("Locate the address and confirm the pin on the map before saving.")
+            )
+        }
+        if (!GeoValidation.isValidCoordinate(lat, lon)) {
+            return Result.failure(IllegalArgumentException("Valid map coordinates are required."))
+        }
+        val existing = existingId?.let { storeDao.getStore(it) }
+        val effectiveCompanyId = companyId.ifBlank { existing?.companyId.orEmpty() }
+        if (existing != null && companyId.isNotBlank() && existing.companyId.isNotBlank() && existing.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot modify a store belonging to another company."))
         }
         val cleanProvider = providerId?.trim()?.ifEmpty { null }
         if (cleanProvider != null) {
-            val dup = storeDao.findByProviderId(cleanProvider)
+            val dup = storeDao.findByProviderIdInCompany(effectiveCompanyId, cleanProvider)
             if (dup != null && dup.id != existingId) {
                 return Result.failure(IllegalStateException("DUPLICATE_PROVIDER"))
             }
         }
+        val dupNameAddr = storeDao.findDuplicateByNameAndAddress(effectiveCompanyId, trimmedName, trimmedAddress)
+        if (dupNameAddr != null && dupNameAddr.id != existingId) {
+            return Result.failure(IllegalStateException("DUPLICATE_STORE"))
+        }
         val now = System.currentTimeMillis()
-        val existing = existingId?.let { storeDao.getStore(it) }
         val storeId = existing?.id ?: UUID.randomUUID().toString()
-        val effectiveCompanyId = companyId.ifBlank { existing?.companyId.orEmpty() }
         val entity = StoreEntity(
             id = storeId,
             name = trimmedName,
@@ -474,7 +498,9 @@ class DeliFarRepository(
             syncState = SyncState.PENDING,
             serverUpdatedAt = existing?.serverUpdatedAt,
             updatedByUid = actorUid,
-            version = (existing?.version ?: 0) + 1
+            version = (existing?.version ?: 0) + 1,
+            locationConfirmed = true,
+            geocodeSource = geocodeSource.ifBlank { "manual" }
         )
         val validatedHours = (1..7).map { day ->
             val found = hours.find { it.day == day }
@@ -591,6 +617,9 @@ class DeliFarRepository(
         }
         val store = storeDao.getStore(storeId)
             ?: return Result.failure(IllegalArgumentException("Please select a saved store."))
+        if (companyId.isNotBlank() && store.companyId.isNotBlank() && store.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot schedule work for a store from another company."))
+        }
         if (store.archived) {
             val existing = jobDao.getJobWithItems(jobId)?.job
             if (existing == null || existing.status in JobStatus.ACTIVE) {
@@ -937,6 +966,10 @@ class DeliFarRepository(
         val prior = supersedesInvoiceId?.let { invoiceDao.getInvoiceWithPages(it)?.invoice }
         val nextVersion = (prior?.version ?: 0) + 1
         val totalBytes = pages.sumOf { it.byteSize }
+        val linkedJob = jobId?.ifBlank { null }?.let { jobDao.getJobWithItems(it)?.job }
+        val effectiveDriverUid = linkedJob?.assignedDriverUid
+            ?: prior?.assignedDriverUid
+            ?: if (actorRole == EmployeeRole.DRIVER) actorUid.ifBlank { null } else null
 
         val invoice = InvoiceEntity(
             id = invoiceId,
@@ -955,7 +988,8 @@ class DeliFarRepository(
             modifiedAt = now,
             signed = false,
             totalBytes = totalBytes,
-            syncState = SyncState.PENDING
+            syncState = SyncState.PENDING,
+            assignedDriverUid = effectiveDriverUid
         )
         val normalizedPages = pages.mapIndexed { idx, p ->
             p.copy(invoiceId = invoiceId, pageIndex = idx)
@@ -1182,7 +1216,7 @@ class DeliFarRepository(
         payloadJson: String = "{}"
     ) {
         if (companyId.isBlank()) return
-        val existing = syncQueueDao.findExisting(entityType, entityId, operation)
+        val existing = syncQueueDao.findExistingInCompany(companyId, entityType, entityId, operation)
         val now = System.currentTimeMillis()
         val entry = SyncQueueEntity(
             id = existing?.id ?: UUID.randomUUID().toString(),
@@ -1200,8 +1234,9 @@ class DeliFarRepository(
         syncQueueDao.upsert(entry)
     }
 
-    suspend fun retryFailedSyncItems() {
-        syncQueueDao.resetFailedForRetry()
+    suspend fun retryFailedSyncItems(companyId: String = "") {
+        if (companyId.isBlank()) syncQueueDao.resetFailedForRetry()
+        else syncQueueDao.resetFailedForCompany(companyId)
     }
 
     // --- Search Cache & Notification Receipts ---

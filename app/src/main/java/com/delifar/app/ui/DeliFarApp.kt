@@ -36,7 +36,6 @@ import com.delifar.app.R
 import com.delifar.app.data.EmployeeRole
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
-import com.delifar.app.ui.components.GoogleMapsQuotaBanner
 import com.delifar.app.ui.components.ProvideAppLocale
 import com.delifar.app.ui.components.SyncStatusBanner
 import com.delifar.app.ui.components.lStr
@@ -90,7 +89,6 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
     val syncState by viewModel.syncState.collectAsState()
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsState()
     val failedSyncCount by viewModel.failedSyncCount.collectAsState()
-    val mapsQuotaExceeded by viewModel.mapsQuotaExceeded.collectAsState()
 
     val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
     val canManage = remember(prefs.activeUserRole) { RolePermissions.canManageStoresAndJobs(prefs.activeUserRole) }
@@ -156,10 +154,6 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 topBar = {
                     Column(modifier = Modifier.statusBarsPadding()) {
-                        GoogleMapsQuotaBanner(
-                            visible = mapsQuotaExceeded,
-                            onDismiss = { viewModel.dismissMapsQuotaWarning() }
-                        )
                         SyncStatusBanner(
                             syncState = syncState,
                             pendingCount = pendingSyncCount,

@@ -55,12 +55,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.delifar.app.R
+import com.delifar.app.data.AppPreferences
 import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.PrefKeys
 import com.delifar.app.data.SearchArea
@@ -69,6 +71,7 @@ import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.RoleBadge
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.theme.SuccessGreen
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -112,12 +115,17 @@ fun SettingsScreen(
         if (uri != null) viewModel.inspectImportUri(uri)
     }
 
+    val scope = rememberCoroutineScope()
     var summaryTimeInput by remember(prefs.summaryMinute) {
         mutableStateOf(BusinessRules.formatMinuteOfDay(prefs.summaryMinute))
     }
     var advanceInput by remember(prefs.advance) {
         mutableStateOf(prefs.advance.toString())
     }
+    var geocodingUrlInput by remember(prefs.geocodingUrl) { mutableStateOf(prefs.geocodingUrl) }
+    var routingUrlInput by remember(prefs.routingUrl) { mutableStateOf(prefs.routingUrl) }
+    var mapStyleUrlInput by remember(prefs.mapStyleUrl) { mutableStateOf(prefs.mapStyleUrl) }
+    var allowOsmFallback by remember(prefs.allowOsmFallback) { mutableStateOf(prefs.allowOsmFallback) }
     var tzDropdownExpanded by remember { mutableStateOf(false) }
     val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
 
@@ -447,7 +455,99 @@ fun SettingsScreen(
                 }
             }
 
-            // About DeliFar 2.0 & Google Maps Platform Legal Attribution
+            // Map, Geocoding & Routing Services (Free & Configurable)
+            item {
+                SettingsCard(title = lStr(R.string.settings_mapping_services)) {
+                    Text(
+                        text = lStr(R.string.settings_mapping_policy_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = mapStyleUrlInput == AppPreferences.DEFAULT_MAP_STYLE_URL,
+                            onClick = { mapStyleUrlInput = AppPreferences.DEFAULT_MAP_STYLE_URL },
+                            label = { Text("OpenFreeMap Liberty") }
+                        )
+                        FilterChip(
+                            selected = mapStyleUrlInput == AppPreferences.OPENFREEMAP_POSITRON_STYLE_URL,
+                            onClick = { mapStyleUrlInput = AppPreferences.OPENFREEMAP_POSITRON_STYLE_URL },
+                            label = { Text("Positron Light") }
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = mapStyleUrlInput,
+                        onValueChange = { mapStyleUrlInput = it },
+                        label = { Text(lStr(R.string.settings_map_style_url)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    ToggleSettingRow(
+                        label = lStr(R.string.settings_allow_osm_fallback),
+                        checked = allowOsmFallback,
+                        onCheckedChange = { allowOsmFallback = it }
+                    )
+
+                    OutlinedTextField(
+                        value = geocodingUrlInput,
+                        onValueChange = { geocodingUrlInput = it },
+                        label = { Text(lStr(R.string.settings_geocoding_url)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    OutlinedTextField(
+                        value = routingUrlInput,
+                        onValueChange = { routingUrlInput = it },
+                        label = { Text(lStr(R.string.settings_routing_url)) },
+                        placeholder = { Text("Leave blank for offline stop order") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    val res = viewModel.updateMappingSettings(
+                                        geocodingUrl = geocodingUrlInput,
+                                        routingUrl = routingUrlInput,
+                                        mapStyleUrl = mapStyleUrlInput,
+                                        allowOsmFallback = allowOsmFallback
+                                    )
+                                    res.onFailure { viewModel.notifyMessage(it.message ?: "Invalid endpoint URL.") }
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(lStr(R.string.save))
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                geocodingUrlInput = AppPreferences.DEFAULT_GEOCODING_URL
+                                routingUrlInput = AppPreferences.DEFAULT_ROUTING_URL
+                                mapStyleUrlInput = AppPreferences.DEFAULT_MAP_STYLE_URL
+                                allowOsmFallback = true
+                                scope.launch {
+                                    viewModel.updateMappingSettings(
+                                        geocodingUrl = AppPreferences.DEFAULT_GEOCODING_URL,
+                                        routingUrl = AppPreferences.DEFAULT_ROUTING_URL,
+                                        mapStyleUrl = AppPreferences.DEFAULT_MAP_STYLE_URL,
+                                        allowOsmFallback = true
+                                    )
+                                }
+                            }
+                        ) {
+                            Text(lStr(R.string.reset_defaults))
+                        }
+                    }
+                }
+            }
+
+            // About DeliFar 2.0 & Open Mapping Attribution
             item {
                 SettingsCard(title = lStr(R.string.settings_about)) {
                     Text(
@@ -458,19 +558,27 @@ fun SettingsScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(
                             onClick = {
-                                val uri = Uri.parse("https://cloud.google.com/maps-platform/terms")
+                                val uri = Uri.parse("https://openfreemap.org")
                                 runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
                             }
                         ) {
-                            Text("Google Maps Terms")
+                            Text("OpenFreeMap")
                         }
                         TextButton(
                             onClick = {
-                                val uri = Uri.parse("https://policies.google.com/privacy")
+                                val uri = Uri.parse("https://www.openstreetmap.org/copyright")
                                 runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
                             }
                         ) {
-                            Text("Google Privacy Policy")
+                            Text("OpenStreetMap ©")
+                        }
+                        TextButton(
+                            onClick = {
+                                val uri = Uri.parse("https://maplibre.org")
+                                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                            }
+                        ) {
+                            Text("MapLibre")
                         }
                     }
                 }

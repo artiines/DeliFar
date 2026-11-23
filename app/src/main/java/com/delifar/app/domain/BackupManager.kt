@@ -57,9 +57,9 @@ class BackupManager(private val db: DeliFarDatabase) {
         private val PREF_KEYS = setOf("key", "value")
     }
 
-    suspend fun exportJson(): String {
-        val stores = db.storeDao().getAllStoresWithHours()
-        val jobs = db.jobDao().getAllJobsWithItems()
+    suspend fun exportJson(activeCompanyId: String = ""): String {
+        val stores = db.storeDao().getStoresWithHoursByCompany(activeCompanyId)
+        val jobs = db.jobDao().getJobsWithItemsByCompany(activeCompanyId)
         val prefsMap = db.preferenceDao().getAll().associate { it.key to it.value }
 
         val root = JSONObject()
@@ -364,9 +364,9 @@ class BackupManager(private val db: DeliFarDatabase) {
         }
     }
 
-    suspend fun buildPreview(backup: ParsedBackup): ImportPreview {
-        val existingStores = db.storeDao().getAllStoresWithHours().associateBy { it.store.id }
-        val existingJobs = db.jobDao().getAllJobsWithItems().associateBy { it.job.id }
+    suspend fun buildPreview(backup: ParsedBackup, activeCompanyId: String = ""): ImportPreview {
+        val existingStores = db.storeDao().getStoresWithHoursByCompany(activeCompanyId).associateBy { it.store.id }
+        val existingJobs = db.jobDao().getJobsWithItemsByCompany(activeCompanyId).associateBy { it.job.id }
 
         var newStores = 0
         var identicalStores = 0
@@ -412,8 +412,8 @@ class BackupManager(private val db: DeliFarDatabase) {
     ): Result<Unit> {
         return runCatching {
             db.withTransaction {
-                val existingStores = db.storeDao().getAllStoresWithHours().associateBy { it.store.id }
-                val existingJobs = db.jobDao().getAllJobsWithItems().associateBy { it.job.id }
+                val existingStores = db.storeDao().getStoresWithHoursByCompany(activeCompanyId).associateBy { it.store.id }
+                val existingJobs = db.jobDao().getJobsWithItemsByCompany(activeCompanyId).associateBy { it.job.id }
 
                 val finalStores = existingStores.mapValues { it.value.store }.toMutableMap()
                 val storesToWrite = mutableListOf<StoreWithHours>()
@@ -438,7 +438,8 @@ class BackupManager(private val db: DeliFarDatabase) {
                 for (store in finalStores.values) {
                     val pid = store.providerId
                     if (pid != null) {
-                        require(mergedProviders.add(pid)) {
+                        val scopedKey = "${store.companyId}|$pid"
+                        require(mergedProviders.add(scopedKey)) {
                             "Merge conflict: duplicate place providerId ($pid) across different store IDs."
                         }
                     }

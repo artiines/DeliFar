@@ -9,6 +9,7 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
+import androidx.room.Upsert
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
@@ -24,7 +25,7 @@ interface CompanyDao {
     @Query("SELECT * FROM companies WHERE id = :companyId")
     suspend fun getCompany(companyId: String): CompanyEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsert(company: CompanyEntity)
 
     @Query("UPDATE companies SET storageUsedBytes = :bytes, modified = :modified WHERE id = :companyId")
@@ -45,10 +46,10 @@ interface EmployeeDao {
     @Query("SELECT * FROM employees WHERE uid = :uid")
     fun observeByUid(uid: String): Flow<EmployeeEntity?>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsert(employee: EmployeeEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertAll(employees: List<EmployeeEntity>)
 
     @Query("UPDATE employees SET active = :active, lastActiveAt = :now WHERE uid = :uid")
@@ -69,7 +70,7 @@ interface InvitationDao {
     @Query("SELECT * FROM invitations WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): InvitationEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsert(invitation: InvitationEntity)
 
     @Query("UPDATE invitations SET status = :status WHERE id = :id")
@@ -79,8 +80,16 @@ interface InvitationDao {
 @Dao
 interface StoreDao {
     @Transaction
+    @Query("SELECT * FROM stores WHERE companyId = :companyId ORDER BY archived ASC, name COLLATE NOCASE ASC")
+    fun observeStoresWithHoursByCompany(companyId: String): Flow<List<StoreWithHours>>
+
+    @Transaction
     @Query("SELECT * FROM stores ORDER BY archived ASC, name COLLATE NOCASE ASC")
     fun observeAllStoresWithHours(): Flow<List<StoreWithHours>>
+
+    @Transaction
+    @Query("SELECT * FROM stores WHERE companyId = :companyId ORDER BY id ASC")
+    suspend fun getStoresWithHoursByCompany(companyId: String): List<StoreWithHours>
 
     @Transaction
     @Query("SELECT * FROM stores ORDER BY id ASC")
@@ -103,7 +112,15 @@ interface StoreDao {
     @Query("SELECT * FROM stores WHERE providerId = :providerId LIMIT 1")
     suspend fun findByProviderId(providerId: String): StoreEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Query("SELECT * FROM stores WHERE companyId = :companyId AND providerId = :providerId LIMIT 1")
+    suspend fun findByProviderIdInCompany(companyId: String, providerId: String): StoreEntity?
+
+    @Query(
+        "SELECT * FROM stores WHERE companyId = :companyId AND LOWER(TRIM(name)) = LOWER(TRIM(:name)) AND LOWER(TRIM(address)) = LOWER(TRIM(:address)) LIMIT 1"
+    )
+    suspend fun findDuplicateByNameAndAddress(companyId: String, name: String, address: String): StoreEntity?
+
+    @Upsert
     suspend fun upsertStore(store: StoreEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -137,6 +154,25 @@ interface JobDao {
                s.phone AS liveStorePhone
         FROM jobs j
         LEFT JOIN stores s ON s.id = j.storeId
+        WHERE j.companyId = :companyId
+        ORDER BY j.date ASC, CASE WHEN j.time IS NULL THEN 1 ELSE 0 END ASC, j.time ASC, j.created ASC
+        """
+    )
+    fun observeJobRowsByCompany(companyId: String): Flow<List<JobListRow>>
+
+    @Query(
+        """
+        SELECT j.*,
+               (SELECT COUNT(*) FROM items i WHERE i.jobId = j.id) AS lineCount,
+               (SELECT COUNT(*) FROM invoices inv WHERE inv.jobId = j.id AND inv.status != 'voided') AS invoiceCount,
+               (SELECT COUNT(*) FROM invoices inv WHERE inv.jobId = j.id AND inv.signed = 1 AND inv.status != 'voided') AS signedInvoiceCount,
+               s.name AS liveStoreName,
+               s.address AS liveStoreAddress,
+               s.lat AS liveStoreLat,
+               s.lon AS liveStoreLon,
+               s.phone AS liveStorePhone
+        FROM jobs j
+        LEFT JOIN stores s ON s.id = j.storeId
         ORDER BY j.date ASC, CASE WHEN j.time IS NULL THEN 1 ELSE 0 END ASC, j.time ASC, j.created ASC
         """
     )
@@ -151,11 +187,18 @@ interface JobDao {
     suspend fun getJobWithItems(jobId: String): JobWithItems?
 
     @Transaction
+    @Query("SELECT * FROM jobs WHERE companyId = :companyId ORDER BY id ASC")
+    suspend fun getJobsWithItemsByCompany(companyId: String): List<JobWithItems>
+
+    @Transaction
     @Query("SELECT * FROM jobs ORDER BY id ASC")
     suspend fun getAllJobsWithItems(): List<JobWithItems>
 
     @Query("SELECT * FROM jobs WHERE companyId = ''")
     suspend fun getUnmigratedJobs(): List<JobEntity>
+
+    @Query("SELECT * FROM jobs WHERE companyId = :companyId AND status IN ('pending', 'progress')")
+    suspend fun getActiveJobsByCompany(companyId: String): List<JobEntity>
 
     @Query("SELECT * FROM jobs WHERE status IN ('pending', 'progress')")
     suspend fun getActiveJobs(): List<JobEntity>
@@ -163,7 +206,7 @@ interface JobDao {
     @Query("SELECT COUNT(*) FROM jobs WHERE storeId = :storeId AND status IN ('pending', 'progress')")
     suspend fun countActiveJobsForStore(storeId: String): Int
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertJob(job: JobEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -185,8 +228,16 @@ interface JobDao {
 @Dao
 interface InvoiceDao {
     @Transaction
+    @Query("SELECT * FROM invoices WHERE companyId = :companyId ORDER BY createdAt DESC")
+    fun observeInvoicesWithPagesByCompany(companyId: String): Flow<List<InvoiceWithPages>>
+
+    @Transaction
     @Query("SELECT * FROM invoices ORDER BY createdAt DESC")
     fun observeAllInvoicesWithPages(): Flow<List<InvoiceWithPages>>
+
+    @Transaction
+    @Query("SELECT * FROM invoices WHERE companyId = :companyId AND jobId = :jobId ORDER BY version DESC, createdAt DESC")
+    fun observeInvoicesForJobInCompany(companyId: String, jobId: String): Flow<List<InvoiceWithPages>>
 
     @Transaction
     @Query("SELECT * FROM invoices WHERE jobId = :jobId ORDER BY version DESC, createdAt DESC")
@@ -206,7 +257,7 @@ interface InvoiceDao {
     @Query("SELECT COALESCE(SUM(totalBytes), 0) FROM invoices WHERE companyId = :companyId")
     suspend fun sumStorageBytes(companyId: String): Long
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertInvoice(invoice: InvoiceEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -239,6 +290,9 @@ interface AuditLogDao {
     @Query("SELECT * FROM audit_logs WHERE companyId = :companyId ORDER BY createdAt DESC LIMIT 200")
     fun observeByCompany(companyId: String): Flow<List<AuditLogEntity>>
 
+    @Query("SELECT * FROM audit_logs WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): AuditLogEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entry: AuditLogEntity)
 
@@ -248,14 +302,26 @@ interface AuditLogDao {
 
 @Dao
 interface SyncQueueDao {
+    @Query("SELECT COUNT(*) FROM sync_queue WHERE companyId = :companyId AND status != 'synced'")
+    fun observePendingCountByCompany(companyId: String): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM sync_queue WHERE companyId = :companyId AND status = 'failed'")
+    fun observeFailedCountByCompany(companyId: String): Flow<Int>
+
     @Query("SELECT COUNT(*) FROM sync_queue WHERE status != 'synced'")
     fun observePendingCount(): Flow<Int>
 
     @Query("SELECT COUNT(*) FROM sync_queue WHERE status = 'failed'")
     fun observeFailedCount(): Flow<Int>
 
+    @Query("SELECT * FROM sync_queue WHERE companyId = :companyId AND status != 'synced' AND nextAttemptAt <= :now ORDER BY createdAt ASC LIMIT 100")
+    suspend fun getDueItemsForCompany(companyId: String, now: Long): List<SyncQueueEntity>
+
     @Query("SELECT * FROM sync_queue WHERE status != 'synced' AND nextAttemptAt <= :now ORDER BY createdAt ASC LIMIT 50")
     suspend fun getDueItems(now: Long): List<SyncQueueEntity>
+
+    @Query("SELECT * FROM sync_queue WHERE companyId = :companyId AND entityType = :entityType AND entityId = :entityId AND operation = :operation LIMIT 1")
+    suspend fun findExistingInCompany(companyId: String, entityType: String, entityId: String, operation: String): SyncQueueEntity?
 
     @Query("SELECT * FROM sync_queue WHERE entityType = :entityType AND entityId = :entityId AND operation = :operation LIMIT 1")
     suspend fun findExisting(entityType: String, entityId: String, operation: String): SyncQueueEntity?
@@ -268,6 +334,9 @@ interface SyncQueueDao {
 
     @Query("DELETE FROM sync_queue WHERE status = 'synced'")
     suspend fun pruneSynced()
+
+    @Query("UPDATE sync_queue SET status = 'pending', nextAttemptAt = 0 WHERE companyId = :companyId AND status = 'failed'")
+    suspend fun resetFailedForCompany(companyId: String)
 
     @Query("UPDATE sync_queue SET status = 'pending', nextAttemptAt = 0 WHERE status = 'failed'")
     suspend fun resetFailedForRetry()
@@ -348,7 +417,7 @@ interface SearchCacheDao {
         ReceiptEntity::class,
         SearchCacheEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class DeliFarDatabase : RoomDatabase() {
@@ -621,6 +690,25 @@ abstract class DeliFarDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Track confirmed coordinates & geocoding source on stores
+                db.execSQL("ALTER TABLE `stores` ADD COLUMN `locationConfirmed` INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE `stores` ADD COLUMN `geocodeSource` TEXT NOT NULL DEFAULT 'legacy'")
+                // Scope providerId uniqueness per company so two companies can save the same storefront
+                db.execSQL("DROP INDEX IF EXISTS `index_stores_providerId`")
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_stores_companyId_providerId` ON `stores` (`companyId`, `providerId`)"
+                )
+                // Track assignedDriverUid on invoices for strict driver authorization & query parity
+                db.execSQL("ALTER TABLE `invoices` ADD COLUMN `assignedDriverUid` TEXT")
+                // Company-scoped sync queue index
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_sync_queue_companyId_status_nextAttemptAt` ON `sync_queue` (`companyId`, `status`, `nextAttemptAt`)"
+                )
+            }
+        }
+
         fun getInstance(context: Context): DeliFarDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -628,7 +716,7 @@ abstract class DeliFarDatabase : RoomDatabase() {
                     DeliFarDatabase::class.java,
                     "delifar.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { INSTANCE = it }
             }

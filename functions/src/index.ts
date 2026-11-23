@@ -315,12 +315,15 @@ export const onInvoiceSigned = onDocumentWritten("companies/{companyId}/invoices
   const justSigned = before?.signed !== true && after.signed === true;
   if (!justSigned) return;
 
-  // Stamp authoritative server confirmation time if not already stamped
+  // Stamp authoritative server confirmation time if not already stamped (never un-void)
   if (!after.signedServerAt) {
-    await event.data!.after.ref.update({
+    const updateData: Record<string, unknown> = {
       signedServerAt: FieldValue.serverTimestamp(),
-      status: "synchronized",
-    });
+    };
+    if (after.status !== "voided") {
+      updateData.status = "synchronized";
+    }
+    await event.data!.after.ref.update(updateData);
   }
 
   // Track company storage bytes incrementally

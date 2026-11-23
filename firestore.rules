@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // =========================================================================
-    // Helper Functions
+    // Helper Functions (optimized to stay far below Firestore's 1000-expression cap)
     // =========================================================================
 
     function isSignedIn() {
@@ -38,16 +38,9 @@ service cloud.firestore {
       return isActiveMember(companyId) && memberRole(companyId) in ['owner', 'manager'];
     }
 
-    function isDriver(companyId) {
-      return isActiveMember(companyId) && memberRole(companyId) == 'driver';
-    }
-
-    function isAccountant(companyId) {
-      return isActiveMember(companyId) && memberRole(companyId) == 'accountant';
-    }
-
-    function canUploadOrSignInvoices(companyId) {
-      return isActiveMember(companyId) && memberRole(companyId) in ['owner', 'manager', 'driver'];
+    function driverOwnsOrAssigned(invData) {
+      return invData.createdByUid == request.auth.uid
+        || ('assignedDriverUid' in invData && invData.assignedDriverUid == request.auth.uid);
     }
 
     function validRole(role) {
@@ -66,20 +59,127 @@ service cloud.firestore {
       return s in ['not_signed', 'signed', 'pending_upload', 'synchronized', 'upload_failed', 'voided'];
     }
 
+    function validStoreCoords(lat, lon) {
+      return lat is number
+        && lon is number
+        && lat >= -90 && lat <= 90
+        && lon >= -180 && lon <= 180
+        && !(lat == 0 && lon == 0);
+    }
+
+    function validSignatureFields(data) {
+      return data.acknowledgmentConfirmed == true
+        && data.recipientName is string
+        && data.recipientName.size() >= 1
+        && data.recipientName.size() <= 120;
+    }
+
     function signedInvoiceImmutableFieldsUnchanged() {
-      return request.resource.data.signed == true
-        && request.resource.data.companyId == resource.data.companyId
-        && request.resource.data.storeId == resource.data.storeId
-        && request.resource.data.invoiceNumber == resource.data.invoiceNumber
-        && request.resource.data.version == resource.data.version
-        && request.resource.data.recipientName == resource.data.recipientName
-        && request.resource.data.recipientTitle == resource.data.recipientTitle
-        && request.resource.data.acknowledgmentConfirmed == resource.data.acknowledgmentConfirmed
-        && request.resource.data.signedLocalAt == resource.data.signedLocalAt
-        && request.resource.data.signedPdfStoragePath == resource.data.signedPdfStoragePath
-        && request.resource.data.signedPdfSha256 == resource.data.signedPdfSha256
-        && request.resource.data.signatureStoragePath == resource.data.signatureStoragePath
-        && request.resource.data.pages == resource.data.pages;
+      let req = request.resource.data;
+      let cur = resource.data;
+      return req.signed == true
+        && req.companyId == cur.companyId
+        && req.storeId == cur.storeId
+        && req.createdByUid == cur.createdByUid
+        && req.invoiceNumber == cur.invoiceNumber
+        && req.version == cur.version
+        && req.recipientName == cur.recipientName
+        && req.recipientTitle == cur.recipientTitle
+        && req.acknowledgmentConfirmed == cur.acknowledgmentConfirmed
+        && req.signedLocalAt == cur.signedLocalAt
+        && req.signedPdfStoragePath == cur.signedPdfStoragePath
+        && req.signedPdfSha256 == cur.signedPdfSha256
+        && req.signatureStoragePath == cur.signatureStoragePath
+        && req.pages == cur.pages;
+    }
+
+    function canUpdateInvoice(companyId, invoiceId) {
+      let req = request.resource.data;
+      let cur = resource.data;
+      let role = memberRole(companyId);
+      let isMgr = role in ['owner', 'manager'];
+      let isAuthDriver = role == 'driver' && driverOwnsOrAssigned(cur);
+      let changedKeys = req.diff(cur).affectedKeys();
+
+      return isActiveMember(companyId)
+        && req.id == invoiceId
+        && req.companyId == companyId
+        && req.createdByUid == cur.createdByUid
+        && validInvoiceStatus(req.status)
+        && (
+          // Case 1: Unsigned invoice -> Owner, Manager, or authorized Driver may update or sign it
+          (
+            cur.signed == false
+            && (isMgr || isAuthDriver)
+            && (!req.signed || validSignatureFields(req))
+          )
+          // Case 2: Already signed -> STRICTLY IMMUTABLE except:
+          //   (a) Owner/Manager voiding a non-voided signed invoice with a mandatory reason
+          //   (b) Authorized uploader finalizing sync status to synchronized
+          || (
+            cur.signed == true
+            && cur.status != 'voided'
+            && signedInvoiceImmutableFieldsUnchanged()
+            && (
+              (isMgr
+                && req.status == 'voided'
+                && req.voidedReason is string
+                && req.voidedReason.size() >= 1
+                && changedKeys.hasOnly(['status', 'voidedReason', 'modifiedAt', 'serverUpdatedAt']))
+              || (
+                (isMgr || isAuthDriver)
+                && cur.status in ['signed', 'pending_upload', 'upload_failed']
+                && req.status == 'synchronized'
+                && changedKeys.hasOnly(['status', 'modifiedAt', 'serverUpdatedAt', 'signedServerAt'])
+              )
+            )
+          )
+        );
+    }
+
+    function canUpdateJob(companyId, jobId) {
+      let req = request.resource.data;
+      let cur = resource.data;
+      let role = memberRole(companyId);
+      return isActiveMember(companyId)
+        && req.id == jobId
+        && req.companyId == companyId
+        && validJobType(req.type)
+        && validJobStatus(req.status)
+        && (
+          role in ['owner', 'manager']
+          || (
+            role == 'driver'
+            && cur.assignedDriverUid == request.auth.uid
+            && req.assignedDriverUid == cur.assignedDriverUid
+            && req.storeId == cur.storeId
+            && req.type == cur.type
+            && req.diff(cur).affectedKeys()
+              .hasOnly(['status', 'issue', 'issueNote', 'items', 'completed', 'modified', 'version', 'updatedByUid', 'serverUpdatedAt'])
+          )
+        );
+    }
+
+    function canUpdateEmployee(companyId, uid) {
+      let req = request.resource.data;
+      let cur = resource.data;
+      let role = memberRole(companyId);
+      return isActiveMember(companyId)
+        && req.uid == cur.uid
+        && req.companyId == companyId
+        && validRole(req.role)
+        && (
+          (role == 'owner'
+            && !(uid == request.auth.uid && (req.active == false || req.role != 'owner')))
+          || (
+            uid == request.auth.uid
+            && req.role == cur.role
+            && req.active == cur.active
+            && req.email == cur.email
+            && req.diff(cur).affectedKeys()
+              .hasOnly(['fcmToken', 'phone', 'displayName', 'lastActiveAt', 'serverUpdatedAt'])
+          )
+        );
     }
 
     // =========================================================================
@@ -90,7 +190,6 @@ service cloud.firestore {
       allow get: if isActiveMember(companyId);
       allow list: if false;
 
-      // Owner registers a brand-new company bound to their own UID
       allow create: if isSignedIn()
         && isValidId(companyId)
         && request.resource.data.id == companyId
@@ -103,7 +202,6 @@ service cloud.firestore {
         && request.resource.data.timezone.size() <= 64
         && request.resource.data.defaultArea in ['LA', 'SAC'];
 
-      // Only the active company Owner can update company settings (never reassign ownerUid silently)
       allow update: if isOwner(companyId)
         && request.resource.data.id == companyId
         && request.resource.data.ownerUid == resource.data.ownerUid
@@ -122,8 +220,6 @@ service cloud.firestore {
       match /employees/{uid} {
         allow get, list: if isActiveMember(companyId);
 
-        // Initial owner bootstrapping their own membership on company creation,
-        // or Owner adding an employee record.
         allow create: if isSignedIn()
           && isValidId(uid)
           && request.resource.data.uid == uid
@@ -140,24 +236,7 @@ service cloud.firestore {
             || isOwner(companyId)
           );
 
-        // Owner can change roles/active status; individual active user may only update
-        // their own fcmToken, phone, displayName, or lastActiveAt (NEVER role/active/companyId).
-        allow update: if isActiveMember(companyId)
-          && request.resource.data.uid == resource.data.uid
-          && request.resource.data.companyId == companyId
-          && validRole(request.resource.data.role)
-          && (
-            isOwner(companyId)
-            || (
-              uid == request.auth.uid
-              && request.resource.data.role == resource.data.role
-              && request.resource.data.active == resource.data.active
-              && request.resource.data.email == resource.data.email
-              && request.resource.data.diff(resource.data).affectedKeys()
-                .hasOnly(['fcmToken', 'phone', 'displayName', 'lastActiveAt', 'serverUpdatedAt'])
-            )
-          );
-
+        allow update: if canUpdateEmployee(companyId, uid);
         allow delete: if false;
       }
 
@@ -179,7 +258,6 @@ service cloud.firestore {
           && request.resource.data.email.size() >= 3
           && request.resource.data.email.size() <= 254;
 
-        // Owner can revoke pending invitations; acceptance happens in Cloud Function Admin SDK
         allow update: if isOwner(companyId)
           && request.resource.data.companyId == companyId
           && request.resource.data.status in ['pending', 'revoked'];
@@ -204,10 +282,7 @@ service cloud.firestore {
           && request.resource.data.address is string
           && request.resource.data.address.size() >= 1
           && request.resource.data.address.size() <= 300
-          && request.resource.data.lat is number
-          && request.resource.data.lat >= -90 && request.resource.data.lat <= 90
-          && request.resource.data.lon is number
-          && request.resource.data.lon >= -180 && request.resource.data.lon <= 180
+          && validStoreCoords(request.resource.data.lat, request.resource.data.lon)
           && request.resource.data.archived is bool
           && request.resource.data.version is int && request.resource.data.version >= 1;
 
@@ -219,11 +294,9 @@ service cloud.firestore {
       // =======================================================================
 
       match /jobs/{jobId} {
-        // Owner, Manager, Accountant can view all company jobs;
-        // Drivers can ONLY read jobs assigned to them.
         allow get, list: if isActiveMember(companyId) && (
           memberRole(companyId) in ['owner', 'manager', 'accountant']
-          || (isDriver(companyId) && resource.data.assignedDriverUid == request.auth.uid)
+          || (memberRole(companyId) == 'driver' && resource.data.assignedDriverUid == request.auth.uid)
         );
 
         allow create: if isOwnerOrManager(companyId)
@@ -236,27 +309,7 @@ service cloud.firestore {
           && request.resource.data.items.size() >= 1
           && request.resource.data.items.size() <= 200;
 
-        // Owner/Manager can update any job fields;
-        // Driver can ONLY update status, issue, issueNote, items (actuals), completed, modified, version
-        // on jobs assigned to them, and CANNOT change assignedDriverUid or storeId.
-        allow update: if isActiveMember(companyId)
-          && request.resource.data.id == jobId
-          && request.resource.data.companyId == companyId
-          && validJobType(request.resource.data.type)
-          && validJobStatus(request.resource.data.status)
-          && (
-            isOwnerOrManager(companyId)
-            || (
-              isDriver(companyId)
-              && resource.data.assignedDriverUid == request.auth.uid
-              && request.resource.data.assignedDriverUid == resource.data.assignedDriverUid
-              && request.resource.data.storeId == resource.data.storeId
-              && request.resource.data.type == resource.data.type
-              && request.resource.data.diff(resource.data).affectedKeys()
-                .hasOnly(['status', 'issue', 'issueNote', 'items', 'completed', 'modified', 'version', 'updatedByUid', 'serverUpdatedAt'])
-            )
-          );
-
+        allow update: if canUpdateJob(companyId, jobId);
         allow delete: if false;
       }
 
@@ -267,10 +320,11 @@ service cloud.firestore {
       match /invoices/{invoiceId} {
         allow get, list: if isActiveMember(companyId) && (
           memberRole(companyId) in ['owner', 'manager', 'accountant']
-          || (isDriver(companyId) && resource.data.createdByUid == request.auth.uid)
+          || (memberRole(companyId) == 'driver' && driverOwnsOrAssigned(resource.data))
         );
 
-        allow create: if canUploadOrSignInvoices(companyId)
+        allow create: if isActiveMember(companyId)
+          && memberRole(companyId) in ['owner', 'manager', 'driver']
           && isValidId(invoiceId)
           && request.resource.data.id == invoiceId
           && request.resource.data.companyId == companyId
@@ -280,43 +334,14 @@ service cloud.firestore {
           && request.resource.data.invoiceNumber.size() <= 80
           && validInvoiceStatus(request.resource.data.status)
           && request.resource.data.version is int && request.resource.data.version >= 1
-          && request.resource.data.signed is bool;
+          && request.resource.data.signed is bool
+          && (!request.resource.data.signed || validSignatureFields(request.resource.data))
+          && (memberRole(companyId) != 'driver'
+              || !('assignedDriverUid' in request.resource.data)
+              || request.resource.data.assignedDriverUid == null
+              || request.resource.data.assignedDriverUid == request.auth.uid);
 
-        allow update: if isActiveMember(companyId)
-          && request.resource.data.id == invoiceId
-          && request.resource.data.companyId == companyId
-          && validInvoiceStatus(request.resource.data.status)
-          && (
-            // Case 1: Invoice is not yet signed -> Owner, Manager, or creating Driver may update or sign it
-            (
-              resource.data.signed == false
-              && (isOwnerOrManager(companyId) || (isDriver(companyId) && resource.data.createdByUid == request.auth.uid))
-              && (!request.resource.data.signed || (
-                request.resource.data.acknowledgmentConfirmed == true
-                && request.resource.data.recipientName is string
-                && request.resource.data.recipientName.size() >= 1
-                && request.resource.data.recipientName.size() <= 120
-              ))
-            )
-            // Case 2: Invoice is already signed -> STRICTLY IMMUTABLE except Owner/Manager voiding
-            // or attaching finalized Storage paths right after offline capture upload
-            || (
-              resource.data.signed == true
-              && signedInvoiceImmutableFieldsUnchanged()
-              && (
-                (isOwnerOrManager(companyId)
-                  && request.resource.data.status == 'voided'
-                  && request.resource.data.voidedReason is string
-                  && request.resource.data.voidedReason.size() >= 1)
-                || (
-                  canUploadOrSignInvoices(companyId)
-                  && resource.data.status in ['signed', 'pending_upload', 'upload_failed']
-                  && request.resource.data.status == 'synchronized'
-                )
-              )
-            )
-          );
-
+        allow update: if canUpdateInvoice(companyId, invoiceId);
         allow delete: if false;
       }
 
@@ -331,6 +356,10 @@ service cloud.firestore {
           && isValidId(logId)
           && request.resource.data.id == logId
           && request.resource.data.companyId == companyId
+          && request.resource.data.actorUid == request.auth.uid
+          && request.resource.data.action is string
+          && request.resource.data.action.size() >= 1
+          && request.resource.data.action.size() <= 80
           && request.resource.data.serverTimestamp == request.time;
 
         allow update, delete: if false;

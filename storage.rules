@@ -6,20 +6,63 @@ service firebase.storage {
       return request.auth != null && request.auth.uid != null;
     }
 
-    function employeeDoc(companyId) {
-      return firestore.get(/databases/(default)/documents/companies/$(companyId)/employees/$(request.auth.uid));
+    function employeePath(companyId) {
+      return /databases/(default)/documents/companies/$(companyId)/employees/$(request.auth.uid);
+    }
+
+    function invoicePath(companyId, invoiceId) {
+      return /databases/(default)/documents/companies/$(companyId)/invoices/$(invoiceId);
     }
 
     function isActiveMember(companyId) {
       return isSignedIn()
-        && firestore.exists(/databases/(default)/documents/companies/$(companyId)/employees/$(request.auth.uid))
-        && employeeDoc(companyId).data.active == true
-        && employeeDoc(companyId).data.companyId == companyId;
+        && firestore.exists(employeePath(companyId))
+        && firestore.get(employeePath(companyId)).data.active == true
+        && firestore.get(employeePath(companyId)).data.companyId == companyId;
     }
 
-    function canUploadInvoiceFiles(companyId) {
+    function memberRole(companyId) {
+      return firestore.get(employeePath(companyId)).data.role;
+    }
+
+    function isOwnerOrManager(companyId) {
       return isActiveMember(companyId)
-        && employeeDoc(companyId).data.role in ['owner', 'manager', 'driver'];
+        && memberRole(companyId) in ['owner', 'manager'];
+    }
+
+    function isOwnerManagerOrAccountant(companyId) {
+      return isActiveMember(companyId)
+        && memberRole(companyId) in ['owner', 'manager', 'accountant'];
+    }
+
+    function isDriver(companyId) {
+      return isActiveMember(companyId)
+        && memberRole(companyId) == 'driver';
+    }
+
+    function isDriverInvoiceParticipant(companyId, invoiceId) {
+      return isDriver(companyId)
+        && firestore.exists(invoicePath(companyId, invoiceId))
+        && (
+          firestore.get(invoicePath(companyId, invoiceId)).data.createdByUid == request.auth.uid
+          || firestore.get(invoicePath(companyId, invoiceId)).data.assignedDriverUid == request.auth.uid
+        );
+    }
+
+    function invoiceNotAlreadySigned(companyId, invoiceId) {
+      return !firestore.exists(invoicePath(companyId, invoiceId))
+        || firestore.get(invoicePath(companyId, invoiceId)).data.signed != true;
+    }
+
+    function canUploadToInvoice(companyId, invoiceId) {
+      return invoiceNotAlreadySigned(companyId, invoiceId) && (
+        isOwnerOrManager(companyId)
+        || (isDriver(companyId) && (
+          !firestore.exists(invoicePath(companyId, invoiceId))
+          || firestore.get(invoicePath(companyId, invoiceId)).data.createdByUid == request.auth.uid
+          || firestore.get(invoicePath(companyId, invoiceId)).data.assignedDriverUid == request.auth.uid
+        ))
+      );
     }
 
     function validInvoiceContentType() {
@@ -33,19 +76,23 @@ service firebase.storage {
 
     // Private company invoice storage: originals, edited pages, signature PNGs, signed PDFs
     match /companies/{companyId}/invoices/{invoiceId}/{fileName} {
-      // Any active company member (Owner, Manager, Driver, Accountant) may read company invoices
-      allow read: if isActiveMember(companyId);
+      // Owners, Managers, Accountants may read all company invoices;
+      // Drivers may ONLY read files for invoices they created or are assigned to.
+      allow read: if isOwnerManagerOrAccountant(companyId)
+        || isDriverInvoiceParticipant(companyId, invoiceId);
 
-      // Write-once immutability for signed PDFs and original captures; uploads restricted by role, MIME, size
-      allow create: if canUploadInvoiceFiles(companyId)
+      // Write-once uploads restricted by role, invoice ownership, unsigned state, MIME, and size
+      allow create: if canUploadToInvoice(companyId, invoiceId)
         && withinSizeLimit()
         && validInvoiceContentType()
         && fileName.size() <= 160;
 
-      // Signed PDFs and untouched original photographs cannot be overwritten or deleted
-      allow update: if canUploadInvoiceFiles(companyId)
+      // Signed PDFs, signature PNGs, and untouched original photographs cannot be overwritten;
+      // updates to edited pages are only allowed while the invoice is not yet signed.
+      allow update: if canUploadToInvoice(companyId, invoiceId)
         && !fileName.matches('^signed_.*\\.pdf$')
         && !fileName.matches('^orig_.*')
+        && !fileName.matches('^signature\\.png$')
         && withinSizeLimit()
         && validInvoiceContentType();
 

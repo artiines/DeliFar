@@ -163,7 +163,9 @@ class CloudSyncManager(
                         syncState = SyncState.SYNCED,
                         serverUpdatedAt = serverTs,
                         updatedByUid = doc.getString("updatedByUid") ?: "",
-                        version = remoteVersion
+                        version = remoteVersion,
+                        locationConfirmed = doc.getBoolean("locationConfirmed") ?: true,
+                        geocodeSource = doc.getString("geocodeSource") ?: "cloud"
                     )
                     db.storeDao().upsertStore(store)
                     @Suppress("UNCHECKED_CAST")
@@ -289,57 +291,100 @@ class CloudSyncManager(
             }
         }
 
-        // 5. Invoices (preserving immutability of already signed local docs)
-        listeners += companyRef.collection("invoices").limit(500).addSnapshotListener { snaps, err ->
-            if (err != null) {
-                FirebaseServices.handleFirestoreError(err, OperationType.LIST, "companies/$companyId/invoices")
-                return@addSnapshotListener
-            }
-            if (snaps == null) return@addSnapshotListener
-            scope.launch {
-                for (doc in snaps.documents) {
-                    val local = db.invoiceDao().getInvoiceWithPages(doc.id)?.invoice
-                    val remoteSigned = doc.getBoolean("signed") ?: false
-                    // Never allow an unsigned remote doc to overwrite a locally signed invoice
-                    if (local != null && local.signed && !remoteSigned) continue
-                    val serverTs = (doc.get("serverUpdatedAt") as? Timestamp)?.toDate()?.time
-                    val signedServerTs = (doc.get("signedServerAt") as? Timestamp)?.toDate()?.time
-                    val entity = InvoiceEntity(
-                        id = doc.id,
-                        companyId = companyId,
-                        jobId = doc.getString("jobId"),
-                        storeId = doc.getString("storeId") ?: "",
-                        storeName = doc.getString("storeName") ?: "",
-                        invoiceNumber = doc.getString("invoiceNumber") ?: "",
-                        notes = doc.getString("notes") ?: "",
-                        status = doc.getString("status") ?: InvoiceStatus.SYNCHRONIZED,
-                        version = (doc.getLong("version") ?: 1L).toInt(),
-                        supersedesInvoiceId = doc.getString("supersedesInvoiceId"),
-                        voidedReason = doc.getString("voidedReason"),
-                        createdByUid = doc.getString("createdByUid") ?: "",
-                        createdByName = doc.getString("createdByName") ?: "",
-                        createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
-                        modifiedAt = doc.getLong("modifiedAt") ?: System.currentTimeMillis(),
-                        signed = remoteSigned,
-                        recipientName = doc.getString("recipientName") ?: "",
-                        recipientTitle = doc.getString("recipientTitle") ?: "",
-                        acknowledgmentConfirmed = doc.getBoolean("acknowledgmentConfirmed") ?: false,
-                        signatureLocalPath = local?.signatureLocalPath,
-                        signatureStoragePath = doc.getString("signatureStoragePath"),
-                        signaturePageIndex = (doc.getLong("signaturePageIndex") ?: 0L).toInt(),
-                        signaturePosX = (doc.getDouble("signaturePosX") ?: 0.5).toFloat(),
-                        signaturePosY = (doc.getDouble("signaturePosY") ?: 0.82).toFloat(),
-                        signedLocalAt = doc.getLong("signedLocalAt") ?: local?.signedLocalAt,
-                        signedServerAt = signedServerTs ?: local?.signedServerAt,
-                        signedPdfLocalPath = local?.signedPdfLocalPath,
-                        signedPdfStoragePath = doc.getString("signedPdfStoragePath"),
-                        signedPdfSha256 = doc.getString("signedPdfSha256") ?: local?.signedPdfSha256,
-                        totalBytes = doc.getLong("totalBytes") ?: local?.totalBytes ?: 0L,
-                        syncState = SyncState.SYNCED,
-                        serverUpdatedAt = serverTs,
-                        uploadError = null
-                    )
-                    db.invoiceDao().upsertInvoice(entity)
+        // 5. Invoices (Drivers subscribe ONLY to invoices they created or are assigned to,
+        // matching Firestore security rules so queries never fail with PERMISSION_DENIED)
+        val invoiceQueries = if (role == EmployeeRole.DRIVER && userUid.isNotBlank()) {
+            listOf(
+                companyRef.collection("invoices").whereEqualTo("createdByUid", userUid).limit(500),
+                companyRef.collection("invoices").whereEqualTo("assignedDriverUid", userUid).limit(500)
+            )
+        } else {
+            listOf(companyRef.collection("invoices").limit(500))
+        }
+        for (invoiceQuery in invoiceQueries) {
+            listeners += invoiceQuery.addSnapshotListener { snaps, err ->
+                if (err != null) {
+                    FirebaseServices.handleFirestoreError(err, OperationType.LIST, "companies/$companyId/invoices")
+                    return@addSnapshotListener
+                }
+                if (snaps == null) return@addSnapshotListener
+                scope.launch {
+                    for (doc in snaps.documents) {
+                        val existingWithPages = db.invoiceDao().getInvoiceWithPages(doc.id)
+                        val local = existingWithPages?.invoice
+                        val remoteSigned = doc.getBoolean("signed") ?: false
+                        // Never allow an unsigned remote doc to overwrite a locally signed invoice
+                        if (local != null && local.signed && !remoteSigned) continue
+                        val serverTs = (doc.get("serverUpdatedAt") as? Timestamp)?.toDate()?.time
+                        val signedServerTs = (doc.get("signedServerAt") as? Timestamp)?.toDate()?.time
+                        val entity = InvoiceEntity(
+                            id = doc.id,
+                            companyId = companyId,
+                            jobId = doc.getString("jobId"),
+                            storeId = doc.getString("storeId") ?: "",
+                            storeName = doc.getString("storeName") ?: "",
+                            invoiceNumber = doc.getString("invoiceNumber") ?: "",
+                            notes = doc.getString("notes") ?: "",
+                            status = doc.getString("status") ?: InvoiceStatus.SYNCHRONIZED,
+                            version = (doc.getLong("version") ?: 1L).toInt(),
+                            supersedesInvoiceId = doc.getString("supersedesInvoiceId"),
+                            voidedReason = doc.getString("voidedReason"),
+                            createdByUid = doc.getString("createdByUid") ?: "",
+                            createdByName = doc.getString("createdByName") ?: "",
+                            createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
+                            modifiedAt = doc.getLong("modifiedAt") ?: System.currentTimeMillis(),
+                            signed = remoteSigned,
+                            recipientName = doc.getString("recipientName") ?: "",
+                            recipientTitle = doc.getString("recipientTitle") ?: "",
+                            acknowledgmentConfirmed = doc.getBoolean("acknowledgmentConfirmed") ?: false,
+                            signatureLocalPath = local?.signatureLocalPath,
+                            signatureStoragePath = doc.getString("signatureStoragePath"),
+                            signaturePageIndex = (doc.getLong("signaturePageIndex") ?: 0L).toInt(),
+                            signaturePosX = (doc.getDouble("signaturePosX") ?: 0.5).toFloat(),
+                            signaturePosY = (doc.getDouble("signaturePosY") ?: 0.82).toFloat(),
+                            signedLocalAt = doc.getLong("signedLocalAt") ?: local?.signedLocalAt,
+                            signedServerAt = signedServerTs ?: local?.signedServerAt,
+                            signedPdfLocalPath = local?.signedPdfLocalPath,
+                            signedPdfStoragePath = doc.getString("signedPdfStoragePath"),
+                            signedPdfSha256 = doc.getString("signedPdfSha256") ?: local?.signedPdfSha256,
+                            totalBytes = doc.getLong("totalBytes") ?: local?.totalBytes ?: 0L,
+                            syncState = SyncState.SYNCED,
+                            serverUpdatedAt = serverTs,
+                            uploadError = null,
+                            assignedDriverUid = doc.getString("assignedDriverUid") ?: local?.assignedDriverUid
+                        )
+                        db.invoiceDao().upsertInvoice(entity)
+
+                        // Hydrate remote page metadata while preserving any local cached image paths
+                        @Suppress("UNCHECKED_CAST")
+                        val remotePages = doc.get("pages") as? List<Map<String, Any?>>
+                        if (!remotePages.isNullOrEmpty()) {
+                            val localPagesById = existingWithPages?.pages?.associateBy { it.id }.orEmpty()
+                            val mergedPages = remotePages.mapIndexedNotNull { idx, m ->
+                                val pid = (m["id"] as? String)?.ifBlank { null } ?: return@mapIndexedNotNull null
+                                val lp = localPagesById[pid]
+                                InvoicePageEntity(
+                                    id = pid,
+                                    invoiceId = doc.id,
+                                    pageIndex = (m["pageIndex"] as? Number)?.toInt() ?: idx,
+                                    originalLocalPath = lp?.originalLocalPath.orEmpty(),
+                                    editedLocalPath = lp?.editedLocalPath.orEmpty(),
+                                    originalStoragePath = (m["originalStoragePath"] as? String) ?: lp?.originalStoragePath,
+                                    editedStoragePath = (m["editedStoragePath"] as? String) ?: lp?.editedStoragePath,
+                                    originalSha256 = (m["originalSha256"] as? String) ?: lp?.originalSha256.orEmpty(),
+                                    editedSha256 = (m["editedSha256"] as? String) ?: lp?.editedSha256.orEmpty(),
+                                    rotationDegrees = lp?.rotationDegrees ?: 0,
+                                    contrastBoost = lp?.contrastBoost ?: false,
+                                    cropInsetPercent = lp?.cropInsetPercent ?: 0,
+                                    byteSize = (m["byteSize"] as? Number)?.toLong() ?: lp?.byteSize ?: 0L,
+                                    mimeType = lp?.mimeType ?: "image/jpeg"
+                                )
+                            }
+                            if (mergedPages.isNotEmpty()) {
+                                db.invoiceDao().upsertPages(mergedPages)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -381,21 +426,46 @@ class CloudSyncManager(
     }
 
     /**
-     * Flushes queued offline writes & invoice uploads to Firestore + Firebase Cloud Storage.
-     * Uses exponential retry backoff on transient errors.
+     * Flushes queued offline writes & invoice uploads strictly for the active company.
+     * Enforces dependency ordering (company -> employee -> invitation -> store -> job -> invoice_file -> invoice -> audit)
+     * and exponential retry backoff on transient errors.
      */
-    suspend fun flushPendingQueue(): Boolean {
+    suspend fun flushPendingQueue(companyIdOverride: String? = null): Boolean {
         if (!FirebaseServices.isConfigured) return true
         val fs = FirebaseServices.firestoreOrNull() ?: return true
         val storage = FirebaseServices.storageOrNull()
+        val targetCompanyId = companyIdOverride?.ifBlank { null }
+            ?: activeCompanyId.ifBlank { null }
+            ?: repository.getPreferences().activeCompanyId
+        if (targetCompanyId.isBlank()) return true
+
         val now = System.currentTimeMillis()
-        val due = db.syncQueueDao().getDueItems(now)
-        if (due.isEmpty()) return true
+        val rawDue = db.syncQueueDao().getDueItemsForCompany(targetCompanyId, now)
+        if (rawDue.isEmpty()) return true
+
+        val priorityOrder = mapOf(
+            "company" to 0,
+            "employee" to 1,
+            "invitation" to 2,
+            "store" to 3,
+            "job" to 4,
+            "invoice_file" to 5,
+            "invoice" to 6,
+            "audit" to 7
+        )
+        val due = rawDue.sortedWith(
+            compareBy<com.delifar.app.data.SyncQueueEntity> { priorityOrder[it.entityType] ?: 99 }
+                .thenBy { it.createdAt }
+        )
 
         _syncState.value = _syncState.value.copy(isSyncing = true, lastError = null)
         var allSucceeded = true
+        val failedInvoiceFileIds = mutableSetOf<String>()
 
         for (item in due) {
+            if (item.entityType == "invoice" && item.entityId in failedInvoiceFileIds) {
+                continue // Wait until binary files upload before writing invoice metadata
+            }
             try {
                 val companyRef = fs.collection("companies").document(item.companyId)
                 when (item.entityType) {
@@ -485,6 +555,8 @@ class CloudSyncManager(
                                     "archived" to s.archived,
                                     "updatedByUid" to s.updatedByUid,
                                     "version" to s.version,
+                                    "locationConfirmed" to s.locationConfirmed,
+                                    "geocodeSource" to s.geocodeSource,
                                     "serverUpdatedAt" to FieldValue.serverTimestamp(),
                                     "hours" to swh.hours.map { h ->
                                         mapOf("day" to h.day, "mode" to h.mode, "windows" to h.windows)
@@ -629,6 +701,7 @@ class CloudSyncManager(
                                 "voidedReason" to inv.voidedReason,
                                 "createdByUid" to inv.createdByUid,
                                 "createdByName" to inv.createdByName,
+                                "assignedDriverUid" to inv.assignedDriverUid,
                                 "createdAt" to inv.createdAt,
                                 "modifiedAt" to inv.modifiedAt,
                                 "signed" to inv.signed,
@@ -674,23 +747,36 @@ class CloudSyncManager(
                     }
 
                     "audit" -> {
-                        val logs = db.auditLogDao().observeByCompany(item.companyId)
-                        companyRef.collection("auditLogs").document(item.entityId).set(
-                            mapOf(
-                                "id" to item.entityId,
-                                "companyId" to item.companyId,
-                                "serverTimestamp" to FieldValue.serverTimestamp()
-                            ),
-                            SetOptions.merge()
-                        ).await()
-                        db.auditLogDao().markSynced(item.entityId, SyncState.SYNCED, System.currentTimeMillis())
-                        @Suppress("UNUSED_EXPRESSION")
-                        logs
+                        val entry = db.auditLogDao().getById(item.entityId)
+                        if (entry != null) {
+                            val currentAuthUid = FirebaseServices.authOrNull()?.currentUser?.uid
+                            val actorUidToSend = currentAuthUid?.ifBlank { null } ?: entry.actorUid
+                            companyRef.collection("auditLogs").document(entry.id).set(
+                                mapOf(
+                                    "id" to entry.id,
+                                    "companyId" to entry.companyId,
+                                    "actorUid" to actorUidToSend,
+                                    "actorName" to entry.actorName,
+                                    "actorRole" to entry.actorRole,
+                                    "action" to entry.action,
+                                    "targetType" to entry.targetType,
+                                    "targetId" to entry.targetId,
+                                    "summary" to entry.summary,
+                                    "createdAt" to entry.createdAt,
+                                    "serverTimestamp" to FieldValue.serverTimestamp()
+                                ),
+                                SetOptions.merge()
+                            ).await()
+                            db.auditLogDao().markSynced(entry.id, SyncState.SYNCED, System.currentTimeMillis())
+                        }
                     }
                 }
                 db.syncQueueDao().delete(item.id)
             } catch (e: Exception) {
                 allSucceeded = false
+                if (item.entityType == "invoice_file") {
+                    failedInvoiceFileIds += item.entityId
+                }
                 Log.w(TAG, "Sync failed for ${item.entityType}/${item.entityId}: ${e.message}")
                 val nextRetries = item.retryCount + 1
                 val backoffMs = (30_000L * (1L shl nextRetries.coerceAtMost(6)))

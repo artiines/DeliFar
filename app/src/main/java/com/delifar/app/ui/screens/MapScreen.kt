@@ -2,7 +2,6 @@ package com.delifar.app.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,7 +10,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,7 +25,6 @@ import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.Traffic
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -45,7 +42,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,20 +49,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
+import com.delifar.app.data.AppPreferences
 import com.delifar.app.data.JobListRow
 import com.delifar.app.data.JobStatus
 import com.delifar.app.data.SearchArea
 import com.delifar.app.data.StoreWithHours
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
+import com.delifar.app.network.GeoPoint
+import com.delifar.app.network.GeoValidation
 import com.delifar.app.ui.DeliFarViewModel
+import com.delifar.app.ui.components.DeliFarMapLibreView
 import com.delifar.app.ui.components.JobCard
+import com.delifar.app.ui.components.MapStorePin
 import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.launchDialer
@@ -74,20 +74,6 @@ import com.delifar.app.ui.components.launchDirections
 import com.delifar.app.ui.components.todayHoursSummary
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
-import com.google.android.gms.maps.CameraUpdateFactory
-import com.google.android.gms.maps.model.BitmapDescriptorFactory
-import com.google.android.gms.maps.model.CameraPosition
-import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.LatLngBounds
-import com.google.maps.android.compose.ComposeMapColorScheme
-import com.google.maps.android.compose.GoogleMap
-import com.google.maps.android.compose.MapProperties
-import com.google.maps.android.compose.MapType
-import com.google.maps.android.compose.MapUiSettings
-import com.google.maps.android.compose.Marker
-import com.google.maps.android.compose.MarkerState
-import com.google.maps.android.compose.Polyline
-import com.google.maps.android.compose.rememberCameraPositionState
 import java.time.ZoneId
 
 enum class MapDateFilter { TODAY, OVERDUE, WEEK, ALL }
@@ -106,6 +92,7 @@ fun MapScreen(
     onNewJobForStore: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val prefs by viewModel.preferences.collectAsState()
     val routeState by viewModel.routeState.collectAsState()
     val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
     val (weekStart, weekEnd) = remember(today) { BusinessRules.weekRange(today) }
@@ -113,8 +100,7 @@ fun MapScreen(
     var filter by remember { mutableStateOf(MapDateFilter.TODAY) }
     var listMode by remember { mutableStateOf(false) }
     var selectedStoreId by remember { mutableStateOf<String?>(null) }
-    var trafficEnabled by remember { mutableStateOf(true) }
-    var satelliteMode by remember { mutableStateOf(false) }
+    var minimalStyle by remember { mutableStateOf(false) }
 
     val activeStores = remember(stores) { stores.filter { !it.store.archived } }
 
@@ -138,36 +124,38 @@ fun MapScreen(
     }
 
     val defaultCenter = remember(defaultArea) {
-        if (defaultArea == SearchArea.SAC) LatLng(38.5816, -121.4944) else LatLng(34.0522, -118.2437)
+        if (defaultArea == SearchArea.SAC) GeoPoint(38.5816, -121.4944) else GeoPoint(34.0522, -118.2437)
     }
 
-    val cameraPositionState = rememberCameraPositionState {
-        val first = visibleStores.firstOrNull()?.store
-        position = CameraPosition.fromLatLngZoom(
-            if (first != null) LatLng(first.lat, first.lon) else defaultCenter,
-            11.5f
-        )
-    }
-
-    // Smoothly fit camera to visible store stops when filter changes
-    LaunchedEffect(visibleStores, filter) {
-        if (visibleStores.size == 1) {
-            val s = visibleStores.first().store
-            cameraPositionState.animate(
-                CameraUpdateFactory.newLatLngZoom(LatLng(s.lat, s.lon), 13.5f)
-            )
-        } else if (visibleStores.size > 1) {
-            val boundsBuilder = LatLngBounds.Builder()
-            visibleStores.forEach { boundsBuilder.include(LatLng(it.store.lat, it.store.lon)) }
-            runCatching {
-                cameraPositionState.animate(CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 120))
+    val mapPins = remember(visibleStores, jobsByStore, today) {
+        visibleStores.filter { GeoValidation.isValidCoordinate(it.store.lat, it.store.lon) }.map { swh ->
+            val jobsHere = jobsByStore[swh.store.id].orEmpty()
+            val hasOverdue = jobsHere.any { BusinessRules.isOverdue(it.job.date, it.job.status, today) }
+            val colorHex = when {
+                hasOverdue -> "#DC2626"
+                jobsHere.isNotEmpty() -> "#0284C7"
+                else -> "#183A37"
             }
+            MapStorePin(
+                storeId = swh.store.id,
+                title = swh.store.name,
+                lat = swh.store.lat,
+                lon = swh.store.lon,
+                colorHex = colorHex,
+                activeJobCount = jobsHere.size
+            )
         }
+    }
+
+    val activeStyleUrl = remember(prefs.mapStyleUrl, minimalStyle) {
+        if (minimalStyle) AppPreferences.OPENFREEMAP_POSITRON_STYLE_URL
+        else prefs.mapStyleUrl.ifBlank { AppPreferences.DEFAULT_MAP_STYLE_URL }
     }
 
     val selectedStore = remember(visibleStores, selectedStoreId) {
         visibleStores.find { it.store.id == selectedStoreId }
     }
+    val invalidCoordMsg = lStr(R.string.invalid_store_coordinates)
 
     Scaffold(
         topBar = {
@@ -175,18 +163,11 @@ fun MapScreen(
                 title = { Text(lStr(R.string.map_title), style = MaterialTheme.typography.titleLarge) },
                 actions = {
                     if (!listMode) {
-                        IconButton(onClick = { trafficEnabled = !trafficEnabled }) {
-                            Icon(
-                                imageVector = Icons.Default.Traffic,
-                                contentDescription = lStr(R.string.map_traffic),
-                                tint = if (trafficEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        IconButton(onClick = { satelliteMode = !satelliteMode }) {
+                        IconButton(onClick = { minimalStyle = !minimalStyle }) {
                             Icon(
                                 imageVector = Icons.Default.Layers,
-                                contentDescription = lStr(R.string.map_satellite),
-                                tint = if (satelliteMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                contentDescription = lStr(R.string.map_style_toggle),
+                                tint = if (minimalStyle) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
@@ -209,7 +190,6 @@ fun MapScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Filter chips + Optimize Route button
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -261,7 +241,16 @@ fun MapScreen(
                                 jobsHere = jobsHere,
                                 zoneId = zoneId,
                                 onOpenStore = { onOpenStore(swh.store.id) },
-                                onDirections = { launchDirections(context, swh.store.lat, swh.store.lon, swh.store.name) },
+                                onDirections = {
+                                    val launched = launchDirections(
+                                        context,
+                                        swh.store.lat,
+                                        swh.store.lon,
+                                        swh.store.name,
+                                        swh.store.address
+                                    )
+                                    if (!launched) viewModel.notifyMessage(invalidCoordMsg)
+                                },
                                 onCall = { launchDialer(context, swh.store.phone) }
                             )
                         }
@@ -269,54 +258,20 @@ fun MapScreen(
                 }
             } else {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    val isDark = isSystemInDarkTheme()
-                    GoogleMap(
-                        modifier = Modifier.fillMaxSize(),
-                        cameraPositionState = cameraPositionState,
-                        mapColorScheme = if (isDark) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT,
-                        properties = MapProperties(
-                            mapType = if (satelliteMode) MapType.HYBRID else MapType.NORMAL,
-                            isTrafficEnabled = trafficEnabled
-                        ),
-                        uiSettings = MapUiSettings(
-                            zoomControlsEnabled = true,
-                            compassEnabled = true,
-                            mapToolbarEnabled = true
-                        ),
-                        onMapClick = { selectedStoreId = null }
-                    ) {
-                        visibleStores.forEach { swh ->
-                            val jobsHere = jobsByStore[swh.store.id].orEmpty()
-                            val hasOverdue = jobsHere.any { BusinessRules.isOverdue(it.job.date, it.job.status, today) }
-                            val hue = when {
-                                hasOverdue -> BitmapDescriptorFactory.HUE_RED
-                                jobsHere.isNotEmpty() -> BitmapDescriptorFactory.HUE_AZURE
-                                else -> BitmapDescriptorFactory.HUE_GREEN
-                            }
-                            Marker(
-                                state = MarkerState(position = LatLng(swh.store.lat, swh.store.lon)),
-                                title = swh.store.name,
-                                snippet = if (jobsHere.isNotEmpty()) "${jobsHere.size} active stop(s)" else swh.store.address,
-                                icon = BitmapDescriptorFactory.defaultMarker(hue),
-                                onClick = {
-                                    selectedStoreId = swh.store.id
-                                    true
-                                }
-                            )
-                        }
+                    DeliFarMapLibreView(
+                        styleUrl = activeStyleUrl,
+                        pins = mapPins,
+                        selectedStoreId = selectedStoreId,
+                        routePoints = routeState.route?.polylinePoints.orEmpty(),
+                        isStreetRoute = routeState.route?.isStreetRoute ?: false,
+                        defaultCenter = defaultCenter,
+                        fitTriggerKey = filter,
+                        onSelectStore = { selectedStoreId = it },
+                        modifier = Modifier.fillMaxSize()
+                    )
 
-                        val routePts = routeState.route?.polylinePoints.orEmpty()
-                        if (routePts.size >= 2) {
-                            Polyline(
-                                points = routePts,
-                                color = Color(0xFF183A37),
-                                width = 12f
-                            )
-                        }
-                    }
-
-                    // Optimize Multi-Stop Route overlay via Google Routes API
-                    if (visibleStores.size >= 2) {
+                    // Optimize Multi-Stop Route overlay (OSRM when configured, or Offline Stop Order)
+                    if (mapPins.size >= 2) {
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
@@ -344,11 +299,18 @@ fun MapScreen(
                                 if (r != null) {
                                     val mi = r.distanceMeters / 1609.34
                                     val mins = r.durationSeconds / 60
-                                    Text(
-                                        text = "%.1f mi • %d min".format(mi, mins),
-                                        style = MaterialTheme.typography.labelLarge,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
+                                    Column {
+                                        Text(
+                                            text = "%.1f mi • %d min".format(mi, mins),
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = r.sourceLabel,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                     IconButton(
                                         onClick = { viewModel.clearRoutePlan() },
                                         modifier = Modifier.size(24.dp)
@@ -362,12 +324,30 @@ fun MapScreen(
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.clickable {
-                                            val stops = visibleStores.map { LatLng(it.store.lat, it.store.lon) }
+                                            val stops = mapPins.map { GeoPoint(it.lat, it.lon) }
                                             viewModel.optimizeRouteForStops(stops)
                                         }
                                     )
                                 }
                             }
+                        }
+                    }
+
+                    // Attribution badge when bottom card is closed
+                    if (selectedStore == null) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(10.dp)
+                        ) {
+                            Text(
+                                text = lStr(R.string.map_attribution),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
                         }
                     }
 
@@ -419,12 +399,14 @@ fun MapScreen(
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Button(
                                         onClick = {
-                                            launchDirections(
+                                            val ok = launchDirections(
                                                 context,
                                                 selectedStore.store.lat,
                                                 selectedStore.store.lon,
-                                                selectedStore.store.name
+                                                selectedStore.store.name,
+                                                selectedStore.store.address
                                             )
+                                            if (!ok) viewModel.notifyMessage(invalidCoordMsg)
                                         },
                                         modifier = Modifier.weight(1f)
                                     ) {

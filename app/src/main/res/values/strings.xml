@@ -40,8 +40,7 @@
     <string name="sync_failed">%1$d upload failed — tap to retry</string>
     <string name="sync_offline_mode">Offline Mode</string>
     <string name="sync_now">Sync Now</string>
-    <string name="maps_quota_warning">Google Maps daily quota reached. Some map or route requests are limited.</string>
-    <string name="maps_quota_learn_more">Quota info</string>
+    <string name="reset_defaults">Reset Defaults</string>
 
     <!-- Auth & Company -->
     <string name="account_and_company">Account &amp; Company</string>
@@ -114,14 +113,31 @@
     <string name="search_stores_hint">Filter saved stores…</string>
     <string name="area_la">Los Angeles</string>
     <string name="area_sac">Sacramento</string>
-    <string name="places_search_hint">Search business or address on Google</string>
-    <string name="places_searching">Searching Google Places…</string>
-    <string name="places_no_results">No matching places found in this area.</string>
-    <string name="places_attribution">Powered by Google</string>
-    <string name="duplicate_store_warning">A store with this Google Place is already saved.</string>
+    <string name="places_search_hint">Search business or address (OSM / Geocoder)</string>
+    <string name="places_searching">Searching locations…</string>
+    <string name="places_no_results">No matching locations found. Enter your custom name &amp; full address above or tap the map.</string>
+    <string name="places_attribution">Map data © OpenStreetMap contributors • MapLibre &amp; OpenFreeMap</string>
+    <string name="duplicate_store_warning">A store for this map place is already saved in this company.</string>
+    <string name="duplicate_manual_store_warning">A store with this exact name and address is already saved.</string>
+    <string name="store_details_section">Store Name &amp; Address</string>
     <string name="store_name">Store Name</string>
-    <string name="store_address">Full Address</string>
+    <string name="store_name_placeholder">Any custom business name (kept exactly as typed)</string>
+    <string name="store_address">Full Street Address</string>
+    <string name="store_address_placeholder">Street, city, state (or paste coordinates / Google Maps link)</string>
     <string name="store_phone">Phone (optional)</string>
+    <string name="locate_address">Locate Address</string>
+    <string name="locating_address">Locating address…</string>
+    <string name="select_matching_location">Multiple matches found (%1$d) — select the right address:</string>
+    <string name="confirm_pin_title">Map Location &amp; Pin</string>
+    <string name="tap_map_to_adjust_pin">Review the pin below. Tap anywhere on the map to adjust it manually, then tap Confirm Location.</string>
+    <string name="confirm_location">Confirm Location</string>
+    <string name="location_confirmed_badge">Confirmed</string>
+    <string name="location_unconfirmed_badge">Confirm Pin</string>
+    <string name="location_missing_badge">No Pin Yet</string>
+    <string name="no_pin_yet_hint">Tap \"Locate Address\" above or tap directly on the map to place the store pin.</string>
+    <string name="confirm_location_required">Locate the address (or tap the map) and tap \"Confirm Location\" before saving.</string>
+    <string name="optional_directory_search">Optional: Search Directory by Business Name</string>
+    <string name="invalid_store_coordinates">This store does not have valid confirmed coordinates yet. Edit the store to confirm its pin.</string>
     <string name="receiving_hours">Receiving Hours</string>
     <string name="hours_unknown">Unknown</string>
     <string name="hours_closed">Closed</string>
@@ -130,7 +146,7 @@
     <string name="archive_store">Archive Store</string>
     <string name="restore_store">Restore Store</string>
     <string name="archive_blocked_active_jobs">Complete or cancel active jobs at this store before archiving.</string>
-    <string name="directions">Google Maps</string>
+    <string name="directions">Navigate</string>
     <string name="call_store">Call</string>
 
     <!-- Weekdays -->
@@ -212,13 +228,13 @@
     <string name="void_invoice">Void</string>
     <string name="new_corrected_version">Corrected Version</string>
 
-    <!-- Map (Google Maps Platform Only) -->
+    <!-- Map (MapLibre + OpenFreeMap) -->
     <string name="map_title">Route Map</string>
     <string name="map_list_view">List</string>
     <string name="map_canvas_view">Map</string>
     <string name="map_optimize_route">Optimize Route</string>
-    <string name="map_traffic">Traffic</string>
-    <string name="map_satellite">Satellite</string>
+    <string name="map_style_toggle">Switch Map Style</string>
+    <string name="map_attribution">© OpenFreeMap • © OpenStreetMap</string>
     <string name="map_jobs_at_store">%1$d jobs at this store</string>
 
     <!-- Schedule -->
@@ -256,6 +272,12 @@
     <string name="import_replace_conflicts">Replace conflicting existing records</string>
     <string name="import_restore_prefs">Restore app preferences from backup</string>
     <string name="import_apply">Apply Merge</string>
+    <string name="settings_mapping_services">Map, Geocoding &amp; Routing</string>
+    <string name="settings_mapping_policy_note">Uses MapLibre with OpenFreeMap tiles and Android\'s built-in Geocoder (zero paid APIs). For high-volume business traffic, point Geocoding and OSRM Routing to your own self-hosted HTTPS instances.</string>
+    <string name="settings_map_style_url">Map Style JSON URL (HTTPS)</string>
+    <string name="settings_allow_osm_fallback">Enable OSM Geocoding Fallback</string>
+    <string name="settings_geocoding_url">Geocoding Server URL (Nominatim HTTPS)</string>
+    <string name="settings_routing_url">Routing Server URL (OSRM HTTPS, optional)</string>
     <string name="settings_about">About DeliFar 2.0</string>
-    <string name="about_text">Cloud-connected multi-user delivery, pickup, and invoice signing platform powered by Google Firebase and Google Maps Platform.</string>
+    <string name="about_text">Offline-first, cloud-ready delivery, pickup, and invoice signing platform using MapLibre Native, OpenFreeMap vector tiles, OpenStreetMap geocoding, and Firebase.</string>
 </resources>

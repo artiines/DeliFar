@@ -106,6 +106,12 @@ object PrefKeys {
     const val NOTIF_FAILED_UPLOAD = "notifFailedUpload"
     const val NOTIF_EMPLOYEE_INVITE = "notifEmployeeInvite"
 
+    // Configurable free mapping, geocoding & routing endpoints
+    const val GEOCODING_URL = "geocodingUrl"
+    const val ROUTING_URL = "routingUrl"
+    const val MAP_STYLE_URL = "mapStyleUrl"
+    const val ALLOW_OSM_FALLBACK = "allowOsmFallback"
+
     val BACKUP_KEYS = setOf(LANGUAGE, AREA, DAILY, SUMMARY_MINUTE, JOB_REMINDERS, ADVANCE)
 }
 
@@ -171,7 +177,7 @@ data class InvitationEntity(
 @Entity(
     tableName = "stores",
     indices = [
-        Index(value = ["providerId"], unique = true),
+        Index(value = ["companyId", "providerId"], unique = true),
         Index(value = ["archived", "name"]),
         Index(value = ["companyId"])
     ]
@@ -191,7 +197,9 @@ data class StoreEntity(
     val syncState: String = SyncState.PENDING,
     val serverUpdatedAt: Long? = null,
     val updatedByUid: String = "",
-    val version: Int = 1
+    val version: Int = 1,
+    val locationConfirmed: Boolean = true,
+    val geocodeSource: String = "legacy"
 )
 
 @Entity(
@@ -324,7 +332,8 @@ data class InvoiceEntity(
     val totalBytes: Long = 0L,
     val syncState: String = SyncState.PENDING,
     val serverUpdatedAt: Long? = null,
-    val uploadError: String? = null
+    val uploadError: String? = null,
+    val assignedDriverUid: String? = null
 )
 
 @Entity(
@@ -377,7 +386,10 @@ data class AuditLogEntity(
 
 @Entity(
     tableName = "sync_queue",
-    indices = [Index(value = ["status", "nextAttemptAt"])]
+    indices = [
+        Index(value = ["status", "nextAttemptAt"]),
+        Index(value = ["companyId", "status", "nextAttemptAt"])
+    ]
 )
 data class SyncQueueEntity(
     @PrimaryKey val id: String,
@@ -509,9 +521,18 @@ data class AppPreferences(
     val notifSignedInvoice: Boolean = true,
     val notifMissingSignature: Boolean = true,
     val notifFailedUpload: Boolean = true,
-    val notifEmployeeInvite: Boolean = true
+    val notifEmployeeInvite: Boolean = true,
+    val geocodingUrl: String = DEFAULT_GEOCODING_URL,
+    val routingUrl: String = DEFAULT_ROUTING_URL,
+    val mapStyleUrl: String = DEFAULT_MAP_STYLE_URL,
+    val allowOsmFallback: Boolean = true
 ) {
     companion object {
+        const val DEFAULT_GEOCODING_URL = "https://nominatim.openstreetmap.org"
+        const val DEFAULT_ROUTING_URL = ""
+        const val DEFAULT_MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
+        const val OPENFREEMAP_POSITRON_STYLE_URL = "https://tiles.openfreemap.org/styles/positron"
+
         fun fromMap(map: Map<String, String>): AppPreferences {
             return AppPreferences(
                 language = map[PrefKeys.LANGUAGE]?.takeIf { it in setOf("system", "en", "ru", "hy") } ?: "system",
@@ -533,7 +554,11 @@ data class AppPreferences(
                 notifSignedInvoice = map[PrefKeys.NOTIF_SIGNED_INVOICE]?.toBooleanStrictOrNull() ?: true,
                 notifMissingSignature = map[PrefKeys.NOTIF_MISSING_SIGNATURE]?.toBooleanStrictOrNull() ?: true,
                 notifFailedUpload = map[PrefKeys.NOTIF_FAILED_UPLOAD]?.toBooleanStrictOrNull() ?: true,
-                notifEmployeeInvite = map[PrefKeys.NOTIF_EMPLOYEE_INVITE]?.toBooleanStrictOrNull() ?: true
+                notifEmployeeInvite = map[PrefKeys.NOTIF_EMPLOYEE_INVITE]?.toBooleanStrictOrNull() ?: true,
+                geocodingUrl = map[PrefKeys.GEOCODING_URL]?.trim() ?: DEFAULT_GEOCODING_URL,
+                routingUrl = map[PrefKeys.ROUTING_URL]?.trim() ?: DEFAULT_ROUTING_URL,
+                mapStyleUrl = map[PrefKeys.MAP_STYLE_URL]?.trim()?.ifBlank { DEFAULT_MAP_STYLE_URL } ?: DEFAULT_MAP_STYLE_URL,
+                allowOsmFallback = map[PrefKeys.ALLOW_OSM_FALLBACK]?.toBooleanStrictOrNull() ?: true
             )
         }
     }

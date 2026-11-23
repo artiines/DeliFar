@@ -21,9 +21,9 @@ class SyncWorker(
         val repo = DeliFarRepository(db)
         val syncManager = CloudSyncManager(applicationContext, db, repo)
 
-        val ok = runCatching { syncManager.flushPendingQueue() }.getOrDefault(false)
+        val prefs = repo.getPreferences()
+        val ok = runCatching { syncManager.flushPendingQueue(prefs.activeCompanyId) }.getOrDefault(false)
         if (!ok) {
-            val prefs = repo.getPreferences()
             if (prefs.notifFailedUpload && runAttemptCount >= 2) {
                 ReminderScheduler.postNotification(
                     context = applicationContext,

@@ -234,7 +234,8 @@ fun StoresScreen(
                                                     context,
                                                     swh.store.lat,
                                                     swh.store.lon,
-                                                    swh.store.name
+                                                    swh.store.name,
+                                                    swh.store.address
                                                 )
                                             },
                                             modifier = Modifier.size(36.dp)

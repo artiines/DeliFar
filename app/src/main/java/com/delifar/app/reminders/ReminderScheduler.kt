@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import com.delifar.app.MainActivity
 import com.delifar.app.data.DeliFarDatabase
 import com.delifar.app.data.DeliFarRepository
+import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.JobStatus
 import com.delifar.app.domain.BusinessRules
 import kotlinx.coroutines.CoroutineScope
@@ -25,6 +26,12 @@ import java.time.Duration
 import java.time.Instant
 import java.time.LocalTime
 import java.time.ZonedDateTime
+
+data class ReminderDispatchSummary(
+    val deliveredCount: Int,
+    val failedOrSuppressedCount: Int,
+    val nextScheduledAt: Instant?
+)
 
 object ReminderScheduler {
     const val CHANNEL_ID = "delifar_reminders"
@@ -41,7 +48,7 @@ object ReminderScheduler {
     )
 
     fun ensureChannel(context: Context) {
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         if (manager.getNotificationChannel(CHANNEL_ID) == null) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
@@ -64,17 +71,62 @@ object ReminderScheduler {
         }
     }
 
-    suspend fun rebuildAndDispatchIfDue(context: Context) {
+    fun hasNotificationPermission(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) return false
+        }
+        return runCatching {
+            NotificationManagerCompat.from(context).areNotificationsEnabled()
+        }.getOrDefault(false)
+    }
+
+    suspend fun rebuildAndDispatchIfDue(context: Context): ReminderDispatchSummary {
         ensureChannel(context)
         val db = DeliFarDatabase.getInstance(context)
+        return rebuildAndDispatchIfDue(
+            context = context,
+            db = db,
+            nowInstant = Instant.now(),
+            scheduleAlarm = true,
+            poster = { title, body, notificationId, channelId ->
+                postNotification(context, title, body, notificationId, channelId)
+            }
+        )
+    }
+
+    /**
+     * Evaluates due daily summaries and timed job reminders strictly scoped to the active company
+     * (and active driver when logged in as Driver). Records a delivery receipt ONLY if
+     * notification delivery actually succeeded; denied permissions or failed deliveries will NOT
+     * silently suppress future delivery attempts.
+     */
+    suspend fun rebuildAndDispatchIfDue(
+        context: Context,
+        db: DeliFarDatabase,
+        nowInstant: Instant = Instant.now(),
+        scheduleAlarm: Boolean = true,
+        poster: (title: String, body: String, notificationId: Int, channelId: String) -> Boolean = { title, body, id, channel ->
+            postNotification(context, title, body, id, channel)
+        }
+    ): ReminderDispatchSummary {
         val repo = DeliFarRepository(db)
         val prefs = repo.getPreferences()
         val zone = BusinessRules.resolveZone(prefs.companyTimezone)
-        val activeJobs = db.jobDao().getActiveJobs()
-        val nowInstant = Instant.now()
-        val nowZone = BusinessRules.nowInZone(zone)
+        val companyJobs = db.jobDao().getActiveJobsByCompany(prefs.activeCompanyId)
+        val activeJobs = if (prefs.activeUserRole == EmployeeRole.DRIVER && prefs.activeUserUid.isNotBlank()) {
+            companyJobs.filter { it.assignedDriverUid == prefs.activeUserUid }
+        } else {
+            companyJobs
+        }
+        val nowZone = ZonedDateTime.ofInstant(nowInstant, zone)
 
         val futureCandidates = mutableListOf<CandidateAlert>()
+        var deliveredCount = 0
+        var failedCount = 0
 
         // 1. Daily summary candidate (today if still within 6h window, plus tomorrow)
         if (prefs.daily) {
@@ -83,7 +135,8 @@ object ReminderScheduler {
                 val targetDate = nowZone.toLocalDate().plusDays(dayOffset)
                 val targetZdt = ZonedDateTime.of(targetDate, summaryTime, zone)
                 val triggerInstant = targetZdt.toInstant()
-                val receiptKey = "summary:$targetDate:${prefs.summaryMinute}:${zone.id}"
+                val companyScope = prefs.activeCompanyId.ifBlank { "local" }
+                val receiptKey = "summary:$companyScope:$targetDate:${prefs.summaryMinute}:${zone.id}"
                 if (repo.hasReceipt(receiptKey)) continue
 
                 val jobsForDay = activeJobs.count { it.date == targetDate.toString() }
@@ -99,13 +152,23 @@ object ReminderScheduler {
                     receiptKey = receiptKey,
                     title = "DeliFar Daily Summary",
                     body = body,
-                    notificationId = ("summary:$targetDate").hashCode()
+                    notificationId = ("summary:$companyScope:$targetDate").hashCode()
                 )
                 val delayMs = Duration.between(triggerInstant, nowInstant).toMillis()
                 if (delayMs >= 0L) {
                     if (delayMs <= 6L * 60 * 60 * 1000) {
-                        postNotification(context, candidate.title, candidate.body, candidate.notificationId, CHANNEL_ID)
-                        repo.recordReceipt(candidate.receiptKey)
+                        val delivered = poster(
+                            candidate.title,
+                            candidate.body,
+                            candidate.notificationId,
+                            CHANNEL_ID
+                        )
+                        if (delivered) {
+                            repo.recordReceipt(candidate.receiptKey)
+                            deliveredCount++
+                        } else {
+                            failedCount++
+                        }
                     }
                 } else {
                     futureCandidates += candidate
@@ -134,49 +197,67 @@ object ReminderScheduler {
                     notificationId = job.id.hashCode()
                 )
                 if (!triggerInstant.isAfter(nowInstant)) {
-                    postNotification(context, candidate.title, candidate.body, candidate.notificationId, CHANNEL_ID)
-                    repo.recordReceipt(candidate.receiptKey)
+                    val delivered = poster(
+                        candidate.title,
+                        candidate.body,
+                        candidate.notificationId,
+                        CHANNEL_ID
+                    )
+                    if (delivered) {
+                        repo.recordReceipt(candidate.receiptKey)
+                        deliveredCount++
+                    } else {
+                        failedCount++
+                    }
                 } else {
                     futureCandidates += candidate
                 }
             }
         }
 
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(context, ReminderReceiver::class.java).apply { action = ACTION_ALARM_FIRE }
-        val pi = PendingIntent.getBroadcast(
-            context,
-            ALARM_REQUEST_CODE,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
         val next = futureCandidates.minByOrNull { it.triggerAt }
-        if (next != null) {
-            alarmManager.setAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                next.triggerAt.toEpochMilli(),
-                pi
-            )
-        } else {
-            alarmManager.cancel(pi)
+        if (scheduleAlarm) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+            if (alarmManager != null) {
+                val intent = Intent(context, ReminderReceiver::class.java).apply { action = ACTION_ALARM_FIRE }
+                val pi = PendingIntent.getBroadcast(
+                    context,
+                    ALARM_REQUEST_CODE,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                if (next != null) {
+                    alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        next.triggerAt.toEpochMilli(),
+                        pi
+                    )
+                } else {
+                    alarmManager.cancel(pi)
+                }
+            }
         }
+        return ReminderDispatchSummary(
+            deliveredCount = deliveredCount,
+            failedOrSuppressedCount = failedCount,
+            nextScheduledAt = next?.triggerAt
+        )
     }
 
+    /**
+     * Posts a local Android notification and returns true ONLY if permission was granted,
+     * notifications are enabled for the app, and NotificationManagerCompat accepted the notification.
+     */
     fun postNotification(
         context: Context,
         title: String,
         body: String,
         notificationId: Int,
         channelId: String = CLOUD_CHANNEL_ID
-    ) {
+    ): Boolean {
         ensureChannel(context)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) return
+        if (!hasNotificationPermission(context)) {
+            return false
         }
         val launchIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -197,8 +278,13 @@ object ReminderScheduler {
             .setContentIntent(contentPi)
             .build()
 
-        runCatching {
+        return try {
             NotificationManagerCompat.from(context).notify(notificationId, notification)
+            true
+        } catch (_: SecurityException) {
+            false
+        } catch (_: Exception) {
+            false
         }
     }
 }

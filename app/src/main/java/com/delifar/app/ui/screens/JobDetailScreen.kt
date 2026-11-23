@@ -275,7 +275,7 @@ fun JobDetailScreen(
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
-                                onClick = { launchDirections(context, storeLat, storeLon, storeName) }
+                                onClick = { launchDirections(context, storeLat, storeLon, storeName, storeAddress) }
                             ) {
                                 Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(4.dp))

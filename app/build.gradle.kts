@@ -2,7 +2,6 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
-    id("com.google.android.libraries.mapsplatform.secrets-gradle-plugin")
 }
 
 // Activate Google Services plugin automatically whenever app/google-services.json is present
@@ -18,23 +17,28 @@ android {
         applicationId = "com.delifar.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "2.0.0"
+        versionCode = 3
+        versionName = "2.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
         create("debugConfig") {
-            storeFile = file("${rootDir}/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            val ks = file("${rootDir}/debug.keystore")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = System.getenv("DELIFAR_DEBUG_STORE_PASSWORD") ?: "android"
+                keyAlias = System.getenv("DELIFAR_DEBUG_KEY_ALIAS") ?: "androiddebugkey"
+                keyPassword = System.getenv("DELIFAR_DEBUG_KEY_PASSWORD") ?: "android"
+            }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("debugConfig")
+            if (file("${rootDir}/debug.keystore").exists()) {
+                signingConfig = signingConfigs.getByName("debugConfig")
+            }
         }
         release {
             isMinifyEnabled = false
@@ -55,16 +59,17 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
-}
-
-secrets {
-    propertiesFileName = ".env"
-    defaultPropertiesFileName = ".env.example"
 }
 
 ksp {
@@ -94,14 +99,12 @@ dependencies {
     // WorkManager for reliable background sync & uploads
     implementation("androidx.work:work-runtime-ktx:2.10.0")
 
-    // Coroutines & Play Services Tasks bridge
+    // Coroutines & Play Services Tasks bridge (for Firebase Tasks)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2")
 
-    // Google Maps Platform (Maps SDK for Android + Compose + Location)
-    implementation("com.google.android.gms:play-services-maps:19.2.0")
-    implementation("com.google.maps.android:maps-compose:6.4.1")
-    implementation("com.google.android.gms:play-services-location:21.3.0")
+    // Free Native Vector Mapping: MapLibre Android SDK (renders OpenFreeMap tiles, zero API key)
+    implementation("org.maplibre.gl:android-sdk:11.8.0")
 
     // Firebase SDK (BoM 34.17.0 — Auth, Firestore, Storage, Messaging, Functions, App Check, Crashlytics)
     implementation(platform("com.google.firebase:firebase-bom:34.17.0"))
@@ -114,8 +117,12 @@ dependencies {
     implementation("com.google.firebase:firebase-appcheck-debug")
     implementation("com.google.firebase:firebase-crashlytics")
 
-    // Unit testing
+    // Automated unit & Room migration / Robolectric tests
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core:1.6.1")
+    testImplementation("androidx.room:room-testing:2.7.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
