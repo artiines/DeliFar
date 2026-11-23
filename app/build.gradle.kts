@@ -27,9 +27,9 @@ android {
             val ks = file("${rootDir}/debug.keystore")
             if (ks.exists()) {
                 storeFile = ks
-                storePassword = System.getenv("DELIFAR_DEBUG_STORE_PASSWORD") ?: "android"
-                keyAlias = System.getenv("DELIFAR_DEBUG_KEY_ALIAS") ?: "androiddebugkey"
-                keyPassword = System.getenv("DELIFAR_DEBUG_KEY_PASSWORD") ?: "android"
+                storePassword = System.getenv("DELIFAR_DEBUG_STORE_PASSWORD")?.ifBlank { null } ?: "android"
+                keyAlias = System.getenv("DELIFAR_DEBUG_KEY_ALIAS")?.ifBlank { null } ?: "androiddebugkey"
+                keyPassword = System.getenv("DELIFAR_DEBUG_KEY_PASSWORD")?.ifBlank { null } ?: "android"
             }
         }
     }
