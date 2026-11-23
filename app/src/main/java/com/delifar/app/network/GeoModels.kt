@@ -43,6 +43,9 @@ data class ComputedRouteResult(
 )
 
 object GeoValidation {
+    const val LEGACY_LA_FALLBACK_LAT = 34.0522
+    const val LEGACY_LA_FALLBACK_LON = -118.2437
+
     /**
      * Validates geographic coordinates and rejects NaN, Infinite, out-of-range values,
      * and Null Island (0.0, 0.0).
@@ -53,6 +56,16 @@ object GeoValidation {
         if (lon < -180.0 || lon > 180.0) return false
         if (abs(lat) < 0.0001 && abs(lon) < 0.0001) return false
         return true
+    }
+
+    /**
+     * Detects legacy stores that previously fell back silently to downtown Los Angeles
+     * coordinates (34.0522, -118.2437) so the app can flag them for user pin review
+     * without deleting or relocating existing records.
+     */
+    fun isSuspectDefaultLosAngelesCoord(lat: Double, lon: Double): Boolean {
+        return abs(lat - LEGACY_LA_FALLBACK_LAT) <= 0.0015 &&
+            abs(lon - LEGACY_LA_FALLBACK_LON) <= 0.0015
     }
 
     /**

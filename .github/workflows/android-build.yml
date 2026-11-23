@@ -7,6 +7,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      allow_ephemeral_keystore:
+        description: "Allow ephemeral debug keystore for non-distributable test run only"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -17,7 +23,7 @@ concurrency:
 
 jobs:
   build:
-    name: Test, Build & Sign DeliFar APK
+    name: Test, Lint, Build & Sign DeliFar APK
     runs-on: ubuntu-latest
 
     steps:
@@ -36,15 +42,24 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Decode signing keystore from repository secret
+      - name: Restore preserved Android signing keystore
         env:
           KEYSTORE_B64: ${{ secrets.DELIFAR_KEYSTORE_BASE64 }}
+          ALLOW_EPHEMERAL: ${{ inputs.allow_ephemeral_keystore }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
             printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]' | base64 --decode > debug.keystore
-            echo "Restored project signing keystore (debug.keystore) from DELIFAR_KEYSTORE_BASE64 secret."
+            if [ ! -s debug.keystore ]; then
+              echo "::error::DELIFAR_KEYSTORE_BASE64 decoded to an empty file."
+              exit 1
+            fi
+            echo "Restored project signing keystore (debug.keystore) from DELIFAR_KEYSTORE_BASE64."
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$ALLOW_EPHEMERAL" = "true" ]; then
+            echo "::warning::Running non-distributable test build without DELIFAR_KEYSTORE_BASE64."
           else
-            echo "::warning::DELIFAR_KEYSTORE_BASE64 secret is not set. Building with an ephemeral runner debug keystore; add DELIFAR_KEYSTORE_BASE64 to preserve your existing Android upgrade signing identity."
+            echo "::error::DELIFAR_KEYSTORE_BASE64 repository secret is required for distributable builds on main and version tags so upgrades preserve your existing Android signing identity. Refusing to silently sign with an ephemeral keystore."
+            exit 1
           fi
 
       - name: Decode optional google-services.json from repository secret
@@ -53,13 +68,16 @@ jobs:
         run: |
           if [ -n "$GOOGLE_SERVICES_B64" ]; then
             printf '%s' "$GOOGLE_SERVICES_B64" | tr -d '[:space:]' | base64 --decode > app/google-services.json
-            echo "Restored app/google-services.json from GOOGLE_SERVICES_JSON_BASE64 secret."
+            echo "Restored app/google-services.json from GOOGLE_SERVICES_JSON_BASE64."
           else
-            echo "Building in offline-first mode (GOOGLE_SERVICES_JSON_BASE64 secret not set)."
+            echo "GOOGLE_SERVICES_JSON_BASE64 not set; building with offline-first Room mode enabled."
           fi
 
-      - name: Run unit, Room migration & Robolectric tests
+      - name: Run unit, Room migration & Robolectric tests (offline Gradle-cached SDK 34)
         run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Run Android Lint
+        run: ./gradlew :app:lintDebug --stacktrace
 
       - name: Assemble signed APK
         env:
@@ -68,11 +86,15 @@ jobs:
           DELIFAR_DEBUG_KEY_PASSWORD: ${{ secrets.DELIFAR_DEBUG_KEY_PASSWORD }}
         run: ./gradlew :app:assembleDebug --stacktrace
 
-      - name: Prepare and verify signed APK artifact
+      - name: Verify APK signature and generate SHA-256 checksum
         run: |
           mkdir -p output
           cp -f app/build/outputs/apk/debug/app-debug.apk output/DeliFar.apk
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found in ANDROID_HOME/build-tools"
+            exit 1
+          fi
           "$APKSIGNER" verify --verbose --print-certs output/DeliFar.apk
           sha256sum output/DeliFar.apk > output/DeliFar.apk.sha256
           cat output/DeliFar.apk.sha256
@@ -87,12 +109,14 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: Upload unit test report on failure
+      - name: Upload test & lint reports on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: unit-test-results
-          path: app/build/reports/tests/testDebugUnitTest/
+          name: ci-failure-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-debug.html
           retention-days: 14
 
       - name: Clean up decoded secrets

@@ -35,18 +35,33 @@ object FirebaseServices {
     var isConfigured: Boolean = false
         private set
 
+    @Volatile
+    var appCheckInstalled: Boolean = false
+        private set
+
+    @Volatile
+    var lastInitError: String? = null
+        private set
+
     fun initializeIfConfigured(context: Context) {
-        val initialized = runCatching {
+        val initResult = runCatching {
             val apps = FirebaseApp.getApps(context)
             val app = if (apps.isNotEmpty()) apps.first() else FirebaseApp.initializeApp(context)
             app != null
-        }.getOrDefault(false)
+        }
+        val initialized = initResult.getOrDefault(false)
+        initResult.exceptionOrNull()?.let { err ->
+            lastInitError = "Firebase init failed: ${err.message ?: err.javaClass.simpleName}"
+            Log.w(TAG, lastInitError, err)
+        }
 
         isConfigured = initialized
         if (!initialized) {
+            appCheckInstalled = false
             Log.i(TAG, "Firebase config (google-services.json) not present; running in offline-first Room mode.")
             return
         }
+        lastInitError = null
 
         // Configure Firestore persistent local cache
         runCatching {
@@ -54,21 +69,29 @@ object FirebaseServices {
                 .setLocalCacheSettings(PersistentCacheSettings.newBuilder().build())
                 .build()
             FirebaseFirestore.getInstance().firestoreSettings = settings
+        }.onFailure { err ->
+            Log.w(TAG, "Firestore persistent cache configuration warning: ${err.message}")
         }
 
         // Initialize Firebase App Check (Debug provider in debug builds, Play Integrity in release)
-        runCatching {
+        appCheckInstalled = runCatching {
             val appCheck = FirebaseAppCheck.getInstance()
             if (BuildConfig.DEBUG) {
                 appCheck.installAppCheckProviderFactory(DebugAppCheckProviderFactory.getInstance())
             } else {
                 appCheck.installAppCheckProviderFactory(PlayIntegrityAppCheckProviderFactory.getInstance())
             }
-        }
+            true
+        }.onFailure { err ->
+            lastInitError = "App Check initialization warning: ${err.message}"
+            Log.w(TAG, lastInitError, err)
+        }.getOrDefault(false)
 
         // Enable Crashlytics collection for release builds
         runCatching {
             FirebaseCrashlytics.getInstance().isCrashlyticsCollectionEnabled = !BuildConfig.DEBUG
+        }.onFailure { err ->
+            Log.w(TAG, "Crashlytics toggle warning: ${err.message}")
         }
     }
 

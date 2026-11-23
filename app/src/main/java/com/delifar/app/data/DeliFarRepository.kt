@@ -48,16 +48,22 @@ class DeliFarRepository(
     fun observeInvitations(companyId: String): Flow<List<InvitationEntity>> = invitationDao.observeByCompany(companyId)
     fun observeStores(companyId: String): Flow<List<StoreWithHours>> =
         storeDao.observeStoresWithHoursByCompany(companyId)
-    fun observeStore(storeId: String): Flow<StoreWithHours?> = storeDao.observeStoreWithHours(storeId)
+    fun observeStore(storeId: String, companyId: String? = null): Flow<StoreWithHours?> =
+        if (!companyId.isNullOrBlank()) storeDao.observeStoreWithHoursInCompany(companyId, storeId)
+        else storeDao.observeStoreWithHours(storeId)
     fun observeJobRows(companyId: String): Flow<List<JobListRow>> =
         jobDao.observeJobRowsByCompany(companyId)
-    fun observeJobWithItems(jobId: String): Flow<JobWithItems?> = jobDao.observeJobWithItems(jobId)
+    fun observeJobWithItems(jobId: String, companyId: String? = null): Flow<JobWithItems?> =
+        if (!companyId.isNullOrBlank()) jobDao.observeJobWithItemsInCompany(companyId, jobId)
+        else jobDao.observeJobWithItems(jobId)
     fun observeInvoices(companyId: String): Flow<List<InvoiceWithPages>> =
         invoiceDao.observeInvoicesWithPagesByCompany(companyId)
     fun observeInvoicesForJob(jobId: String, companyId: String? = null): Flow<List<InvoiceWithPages>> =
         if (companyId != null) invoiceDao.observeInvoicesForJobInCompany(companyId, jobId)
         else invoiceDao.observeInvoicesForJob(jobId)
-    fun observeInvoice(invoiceId: String): Flow<InvoiceWithPages?> = invoiceDao.observeInvoice(invoiceId)
+    fun observeInvoice(invoiceId: String, companyId: String? = null): Flow<InvoiceWithPages?> =
+        if (!companyId.isNullOrBlank()) invoiceDao.observeInvoiceInCompany(companyId, invoiceId)
+        else invoiceDao.observeInvoice(invoiceId)
     fun observeAuditLogs(companyId: String): Flow<List<AuditLogEntity>> =
         auditLogDao.observeByCompany(companyId)
     fun observePendingSyncCount(companyId: String): Flow<Int> =
@@ -83,13 +89,15 @@ class DeliFarRepository(
     suspend fun findStoreByProviderId(providerId: String, companyId: String = ""): StoreEntity? =
         storeDao.findByProviderIdInCompany(companyId, providerId)
 
-    suspend fun getStoreWithHours(storeId: String): StoreWithHours? =
-        storeDao.getStoreWithHours(storeId)
+    suspend fun getStoreWithHours(storeId: String, companyId: String? = null): StoreWithHours? =
+        if (!companyId.isNullOrBlank()) storeDao.getStoreWithHoursInCompany(companyId, storeId)
+        else storeDao.getStoreWithHours(storeId)
 
     suspend fun getCompany(companyId: String): CompanyEntity? = companyDao.getCompany(companyId)
 
-    suspend fun getInvoiceWithPages(invoiceId: String): InvoiceWithPages? =
-        invoiceDao.getInvoiceWithPages(invoiceId)
+    suspend fun getInvoiceWithPages(invoiceId: String, companyId: String? = null): InvoiceWithPages? =
+        if (!companyId.isNullOrBlank()) invoiceDao.getInvoiceWithPagesInCompany(companyId, invoiceId)
+        else invoiceDao.getInvoiceWithPages(invoiceId)
 
     // --- Company & Multi-User Operations ---
 
@@ -287,6 +295,16 @@ class DeliFarRepository(
             invitationDao.setStatus(invite.id, InviteStatus.EXPIRED)
             return Result.failure(IllegalStateException("Invitation code has expired."))
         }
+        val invitedEmail = invite.email.trim().lowercase()
+        val callerEmail = email.trim().lowercase()
+        if (invitedEmail.isBlank() || !invitedEmail.contains("@")) {
+            return Result.failure(IllegalStateException("Invitation record is missing a valid invited email."))
+        }
+        if (callerEmail.isBlank() || callerEmail != invitedEmail) {
+            return Result.failure(
+                SecurityException("This invitation is restricted to $invitedEmail and cannot be redeemed by another email.")
+            )
+        }
         val uid = userUid.ifBlank { "emp_${UUID.randomUUID().toString().take(12)}" }
         val employee = EmployeeEntity(
             uid = uid,
@@ -326,7 +344,8 @@ class DeliFarRepository(
         newRole: String,
         actorUid: String,
         actorName: String,
-        actorRole: String
+        actorRole: String,
+        companyId: String = ""
     ): Result<Unit> {
         if (!RolePermissions.canManageEmployees(actorRole)) {
             return Result.failure(SecurityException("Only company owners can change employee roles."))
@@ -336,6 +355,9 @@ class DeliFarRepository(
         }
         val emp = employeeDao.getByUid(targetUid)
             ?: return Result.failure(IllegalArgumentException("Employee not found."))
+        if (companyId.isNotBlank() && emp.companyId.isNotBlank() && emp.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot modify an employee from another company."))
+        }
         if (emp.uid == actorUid && newRole != EmployeeRole.OWNER) {
             return Result.failure(IllegalStateException("Owner cannot demote themselves."))
         }
@@ -357,13 +379,17 @@ class DeliFarRepository(
         active: Boolean,
         actorUid: String,
         actorName: String,
-        actorRole: String
+        actorRole: String,
+        companyId: String = ""
     ): Result<Unit> {
         if (!RolePermissions.canManageEmployees(actorRole)) {
             return Result.failure(SecurityException("Only company owners can activate or deactivate employees."))
         }
         val emp = employeeDao.getByUid(targetUid)
             ?: return Result.failure(IllegalArgumentException("Employee not found."))
+        if (companyId.isNotBlank() && emp.companyId.isNotBlank() && emp.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot modify an employee from another company."))
+        }
         if (emp.uid == actorUid && !active) {
             return Result.failure(IllegalStateException("Owner cannot deactivate their own account."))
         }
@@ -537,19 +563,24 @@ class DeliFarRepository(
         storeId: String,
         actorUid: String = "",
         actorName: String = "",
-        actorRole: String = EmployeeRole.OWNER
+        actorRole: String = EmployeeRole.OWNER,
+        companyId: String = ""
     ): Result<Unit> {
         if (!RolePermissions.canManageStoresAndJobs(actorRole)) {
             return Result.failure(SecurityException("Only Owners and Managers can archive stores."))
+        }
+        val existing = storeDao.getStore(storeId)
+            ?: return Result.failure(IllegalArgumentException("Store not found."))
+        if (companyId.isNotBlank() && existing.companyId.isNotBlank() && existing.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot archive a store belonging to another company."))
         }
         val activeCount = jobDao.countActiveJobsForStore(storeId)
         if (activeCount > 0) {
             return Result.failure(IllegalStateException("ACTIVE_JOBS"))
         }
-        val existing = storeDao.getStore(storeId)
         db.withTransaction {
             storeDao.setArchived(storeId, true, System.currentTimeMillis())
-            if (existing != null && existing.companyId.isNotBlank()) {
+            if (existing.companyId.isNotBlank()) {
                 enqueueSyncInternal(existing.companyId, "store", storeId, "upsert")
                 recordAuditInternal(
                     existing.companyId, actorUid, actorName, actorRole,
@@ -565,13 +596,15 @@ class DeliFarRepository(
         storeId: String,
         actorUid: String = "",
         actorName: String = "",
-        actorRole: String = EmployeeRole.OWNER
+        actorRole: String = EmployeeRole.OWNER,
+        companyId: String = ""
     ) {
         if (!RolePermissions.canManageStoresAndJobs(actorRole)) return
-        val existing = storeDao.getStore(storeId)
+        val existing = storeDao.getStore(storeId) ?: return
+        if (companyId.isNotBlank() && existing.companyId.isNotBlank() && existing.companyId != companyId) return
         db.withTransaction {
             storeDao.setArchived(storeId, false, System.currentTimeMillis())
-            if (existing != null && existing.companyId.isNotBlank()) {
+            if (existing.companyId.isNotBlank()) {
                 enqueueSyncInternal(existing.companyId, "store", storeId, "upsert")
                 recordAuditInternal(
                     existing.companyId, actorUid, actorName, actorRole,
@@ -731,13 +764,17 @@ class DeliFarRepository(
         driverName: String,
         actorUid: String,
         actorName: String,
-        actorRole: String
+        actorRole: String,
+        companyId: String = ""
     ): Result<JobEntity> {
         if (!RolePermissions.canAssignDrivers(actorRole)) {
             return Result.failure(SecurityException("Only Owners and Managers can assign drivers."))
         }
         val current = jobDao.getJobWithItems(jobId)?.job
             ?: return Result.failure(IllegalArgumentException("Job not found"))
+        if (companyId.isNotBlank() && current.companyId.isNotBlank() && current.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot assign a driver to a job from another company."))
+        }
         val now = System.currentTimeMillis()
         val updated = current.copy(
             assignedDriverUid = driverUid?.ifBlank { null },
@@ -769,17 +806,20 @@ class DeliFarRepository(
         newStatus: String,
         actorUid: String = "",
         actorName: String = "",
-        actorRole: String = EmployeeRole.OWNER
+        actorRole: String = EmployeeRole.OWNER,
+        companyId: String = ""
     ): Result<JobEntity> {
         if (!RolePermissions.canUpdateAssignedJobs(actorRole)) {
             return Result.failure(SecurityException("You do not have permission to update job status."))
         }
         val current = jobDao.getJobWithItems(jobId)
             ?: return Result.failure(IllegalArgumentException("Job not found"))
+        if (companyId.isNotBlank() && current.job.companyId.isNotBlank() && current.job.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot update a job belonging to another company."))
+        }
         if (actorRole == EmployeeRole.DRIVER &&
-            !current.job.assignedDriverUid.isNullOrBlank() &&
-            actorUid.isNotBlank() &&
-            current.job.assignedDriverUid != actorUid
+            (current.job.assignedDriverUid.isNullOrBlank() ||
+                (actorUid.isNotBlank() && current.job.assignedDriverUid != actorUid))
         ) {
             return Result.failure(SecurityException("Drivers can only update deliveries assigned to them."))
         }
@@ -822,7 +862,8 @@ class DeliFarRepository(
         newTime: String?,
         actorUid: String = "",
         actorName: String = "",
-        actorRole: String = EmployeeRole.OWNER
+        actorRole: String = EmployeeRole.OWNER,
+        companyId: String = ""
     ): Result<JobEntity> {
         if (!RolePermissions.canManageStoresAndJobs(actorRole)) {
             return Result.failure(SecurityException("Only Owners and Managers can reschedule jobs."))
@@ -836,6 +877,9 @@ class DeliFarRepository(
         }
         val current = jobDao.getJobWithItems(jobId)?.job
             ?: return Result.failure(IllegalArgumentException("Job not found"))
+        if (companyId.isNotBlank() && current.companyId.isNotBlank() && current.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot reschedule a job from another company."))
+        }
         val now = System.currentTimeMillis()
         val updated = current.copy(
             date = newDate,
@@ -860,9 +904,12 @@ class DeliFarRepository(
         return Result.success(updated)
     }
 
-    suspend fun setJobReminderEnabled(jobId: String, enabled: Boolean): Result<JobEntity> {
+    suspend fun setJobReminderEnabled(jobId: String, enabled: Boolean, companyId: String = ""): Result<JobEntity> {
         val current = jobDao.getJobWithItems(jobId)?.job
             ?: return Result.failure(IllegalArgumentException("Job not found"))
+        if (companyId.isNotBlank() && current.companyId.isNotBlank() && current.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot modify a job from another company."))
+        }
         val now = System.currentTimeMillis()
         val updated = current.copy(
             reminderEnabled = enabled,
@@ -883,7 +930,8 @@ class DeliFarRepository(
         actualQuantitiesByItemId: Map<String, String>,
         actorUid: String = "",
         actorName: String = "",
-        actorRole: String = EmployeeRole.OWNER
+        actorRole: String = EmployeeRole.OWNER,
+        companyId: String = ""
     ): Result<JobEntity> {
         if (!RolePermissions.canUpdateAssignedJobs(actorRole)) {
             return Result.failure(SecurityException("Permission denied."))
@@ -893,6 +941,15 @@ class DeliFarRepository(
         }
         val current = jobDao.getJobWithItems(jobId)
             ?: return Result.failure(IllegalArgumentException("Job not found"))
+        if (companyId.isNotBlank() && current.job.companyId.isNotBlank() && current.job.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot report an issue on a job from another company."))
+        }
+        if (actorRole == EmployeeRole.DRIVER &&
+            (current.job.assignedDriverUid.isNullOrBlank() ||
+                (actorUid.isNotBlank() && current.job.assignedDriverUid != actorUid))
+        ) {
+            return Result.failure(SecurityException("Drivers can only report issues on deliveries assigned to them."))
+        }
 
         val updatedItems = current.sortedItems.map { item ->
             if (issueType == JobIssue.PARTIAL) {
@@ -1033,13 +1090,24 @@ class DeliFarRepository(
         signedPdfBytes: Long,
         actorUid: String,
         actorName: String,
-        actorRole: String
+        actorRole: String,
+        companyId: String = ""
     ): Result<InvoiceEntity> {
         if (!RolePermissions.canUploadAndSignInvoices(actorRole)) {
             return Result.failure(SecurityException("Your role cannot collect signatures."))
         }
         val existing = invoiceDao.getInvoiceWithPages(invoiceId)?.invoice
             ?: return Result.failure(IllegalArgumentException("Invoice not found."))
+        if (companyId.isNotBlank() && existing.companyId.isNotBlank() && existing.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot sign an invoice belonging to another company."))
+        }
+        if (actorRole == EmployeeRole.DRIVER &&
+            actorUid.isNotBlank() &&
+            existing.createdByUid != actorUid &&
+            existing.assignedDriverUid != actorUid
+        ) {
+            return Result.failure(SecurityException("Drivers can only sign invoices assigned to or created by them."))
+        }
         if (existing.signed) {
             return Result.failure(
                 IllegalStateException("Signed invoices are immutable. Create a corrected version instead.")
@@ -1100,7 +1168,8 @@ class DeliFarRepository(
         reason: String,
         actorUid: String,
         actorName: String,
-        actorRole: String
+        actorRole: String,
+        companyId: String = ""
     ): Result<InvoiceEntity> {
         if (!RolePermissions.canVoidOrCorrectInvoices(actorRole)) {
             return Result.failure(SecurityException("Only Owners and Managers can void an invoice."))
@@ -1111,6 +1180,9 @@ class DeliFarRepository(
         }
         val existing = invoiceDao.getInvoiceWithPages(invoiceId)?.invoice
             ?: return Result.failure(IllegalArgumentException("Invoice not found."))
+        if (companyId.isNotBlank() && existing.companyId.isNotBlank() && existing.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot void an invoice belonging to another company."))
+        }
         val now = System.currentTimeMillis()
         val updated = existing.copy(
             status = InvoiceStatus.VOIDED,
@@ -1140,13 +1212,17 @@ class DeliFarRepository(
         correctionNote: String,
         actorUid: String,
         actorName: String,
-        actorRole: String
+        actorRole: String,
+        companyId: String = ""
     ): Result<InvoiceWithPages> {
         if (!RolePermissions.canVoidOrCorrectInvoices(actorRole)) {
             return Result.failure(SecurityException("Only Owners and Managers can create corrected invoice versions."))
         }
         val original = invoiceDao.getInvoiceWithPages(originalInvoiceId)
             ?: return Result.failure(IllegalArgumentException("Original invoice not found."))
+        if (companyId.isNotBlank() && original.invoice.companyId.isNotBlank() && original.invoice.companyId != companyId) {
+            return Result.failure(SecurityException("Cannot create a corrected version for an invoice from another company."))
+        }
         val newInvoiceId = UUID.randomUUID().toString()
         val clonedPages = original.sortedPages.mapIndexed { idx, p ->
             p.copy(

@@ -126,3 +126,30 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
+
+// Reproducibly prefetch Robolectric 4.14.1 Android 14 (SDK 34) instrumented runtime JAR via Gradle/Maven Central
+// so unit tests run deterministically offline without invoking Robolectric's runtime MavenArtifactFetcher.
+val robolectricSdk by configurations.creating {
+    isTransitive = false
+}
+
+dependencies {
+    robolectricSdk("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
+}
+
+val robolectricDepsDir = layout.buildDirectory.dir("robolectric-deps")
+
+val syncRobolectricSdkJars by tasks.registering(Sync::class) {
+    from(robolectricSdk)
+    into(robolectricDepsDir)
+}
+
+tasks.withType<Test>().configureEach {
+    dependsOn(syncRobolectricSdkJars)
+    doFirst {
+        val dir = robolectricDepsDir.get().asFile
+        systemProperty("robolectric.dependency.dir", dir.absolutePath)
+        systemProperty("robolectric.offline", "true")
+    }
+}
+

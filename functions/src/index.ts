@@ -90,9 +90,20 @@ export const acceptEmployeeInvitation = onCall({ enforceAppCheck: true }, async 
     throw new HttpsError("failed-precondition", "This invitation has expired.");
   }
 
-  const callerEmail = (auth.token.email ?? "").toLowerCase();
-  const invitedEmail = typeof invite.email === "string" ? invite.email.toLowerCase() : "";
-  if (invitedEmail && callerEmail && invitedEmail !== callerEmail) {
+  const callerEmail = typeof auth.token.email === "string" ? auth.token.email.trim().toLowerCase() : "";
+  const emailVerified = auth.token.email_verified === true;
+  const invitedEmail = typeof invite.email === "string" ? invite.email.trim().toLowerCase() : "";
+
+  if (!invitedEmail || !invitedEmail.includes("@")) {
+    throw new HttpsError("failed-precondition", "This invitation has an invalid recipient email address.");
+  }
+  if (!callerEmail) {
+    throw new HttpsError("permission-denied", "Your account must have an authenticated email address to redeem an invitation.");
+  }
+  if (!emailVerified) {
+    throw new HttpsError("failed-precondition", "Verify your email address before accepting a company invitation.");
+  }
+  if (invitedEmail !== callerEmail) {
     throw new HttpsError("permission-denied", "This invitation was issued for a different email address.");
   }
 
@@ -102,8 +113,13 @@ export const acceptEmployeeInvitation = onCall({ enforceAppCheck: true }, async 
 
   await db.runTransaction(async (tx) => {
     const freshInvite = await tx.get(inviteDoc.ref);
-    if (!freshInvite.exists || freshInvite.data()?.status !== "pending") {
+    const freshData = freshInvite.data();
+    if (!freshInvite.exists || freshData?.status !== "pending") {
       throw new HttpsError("failed-precondition", "Invitation is no longer valid.");
+    }
+    if (typeof freshData.expiresAt === "number" && freshData.expiresAt < nowMs) {
+      tx.update(inviteDoc.ref, { status: "expired" });
+      throw new HttpsError("failed-precondition", "This invitation has expired.");
     }
     tx.update(inviteDoc.ref, {
       status: "accepted",
@@ -184,6 +200,9 @@ export const updateEmployeeAccess = onCall({ enforceAppCheck: true }, async (req
 
   if (targetUid === auth.uid && active === false) {
     throw new HttpsError("failed-precondition", "Owner cannot deactivate their own account.");
+  }
+  if (targetUid === auth.uid && newRole !== undefined && newRole !== "owner") {
+    throw new HttpsError("failed-precondition", "Owner cannot demote their own role.");
   }
 
   const targetRef = db.doc(`companies/${companyId}/employees/${targetUid}`);

@@ -6,6 +6,18 @@ service firebase.storage {
       return request.auth != null && request.auth.uid != null;
     }
 
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[A-Za-z0-9_-]+$');
+    }
+
+    function validInvoiceFileName(fileName) {
+      return fileName.size() <= 160 && (
+        fileName.matches('^(orig|edit)_[A-Za-z0-9_-]{1,120}\\.(jpg|jpeg|png)$')
+        || fileName == 'signature.png'
+        || fileName.matches('^signed_v[0-9]{1,6}\\.pdf$')
+      );
+    }
+
     function employeePath(companyId) {
       return /databases/(default)/documents/companies/$(companyId)/employees/$(request.auth.uid);
     }
@@ -16,6 +28,7 @@ service firebase.storage {
 
     function isActiveMember(companyId) {
       return isSignedIn()
+        && isValidId(companyId)
         && firestore.exists(employeePath(companyId))
         && firestore.get(employeePath(companyId)).data.active == true
         && firestore.get(employeePath(companyId)).data.companyId == companyId;
@@ -42,6 +55,7 @@ service firebase.storage {
 
     function isDriverInvoiceParticipant(companyId, invoiceId) {
       return isDriver(companyId)
+        && isValidId(invoiceId)
         && firestore.exists(invoicePath(companyId, invoiceId))
         && (
           firestore.get(invoicePath(companyId, invoiceId)).data.createdByUid == request.auth.uid
@@ -55,14 +69,16 @@ service firebase.storage {
     }
 
     function canUploadToInvoice(companyId, invoiceId) {
-      return invoiceNotAlreadySigned(companyId, invoiceId) && (
-        isOwnerOrManager(companyId)
-        || (isDriver(companyId) && (
-          !firestore.exists(invoicePath(companyId, invoiceId))
-          || firestore.get(invoicePath(companyId, invoiceId)).data.createdByUid == request.auth.uid
-          || firestore.get(invoicePath(companyId, invoiceId)).data.assignedDriverUid == request.auth.uid
-        ))
-      );
+      return isValidId(invoiceId)
+        && invoiceNotAlreadySigned(companyId, invoiceId)
+        && (
+          isOwnerOrManager(companyId)
+          || (isDriver(companyId) && (
+            !firestore.exists(invoicePath(companyId, invoiceId))
+            || firestore.get(invoicePath(companyId, invoiceId)).data.createdByUid == request.auth.uid
+            || firestore.get(invoicePath(companyId, invoiceId)).data.assignedDriverUid == request.auth.uid
+          ))
+        );
     }
 
     function validInvoiceContentType() {
@@ -81,18 +97,19 @@ service firebase.storage {
       allow read: if isOwnerManagerOrAccountant(companyId)
         || isDriverInvoiceParticipant(companyId, invoiceId);
 
-      // Write-once uploads restricted by role, invoice ownership, unsigned state, MIME, and size
+      // Write-once uploads restricted by role, invoice ownership, unsigned state, filename pattern, MIME, and size
       allow create: if canUploadToInvoice(companyId, invoiceId)
+        && validInvoiceFileName(fileName)
         && withinSizeLimit()
-        && validInvoiceContentType()
-        && fileName.size() <= 160;
+        && validInvoiceContentType();
 
       // Signed PDFs, signature PNGs, and untouched original photographs cannot be overwritten;
       // updates to edited pages are only allowed while the invoice is not yet signed.
       allow update: if canUploadToInvoice(companyId, invoiceId)
+        && validInvoiceFileName(fileName)
         && !fileName.matches('^signed_.*\\.pdf$')
         && !fileName.matches('^orig_.*')
-        && !fileName.matches('^signature\\.png$')
+        && fileName != 'signature.png'
         && withinSizeLimit()
         && validInvoiceContentType();
 

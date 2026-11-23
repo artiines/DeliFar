@@ -21,6 +21,7 @@ import com.delifar.app.data.InviteStatus
 import com.delifar.app.data.InvoiceEntity
 import com.delifar.app.data.InvoicePageEntity
 import com.delifar.app.data.InvoiceStatus
+import com.delifar.app.data.InvoiceWithPages
 import com.delifar.app.data.JobEntity
 import com.delifar.app.data.JobItemEntity
 import com.delifar.app.data.JobStatus
@@ -617,64 +618,112 @@ class CloudSyncManager(
 
                     "invoice_file" -> {
                         val iwp = db.invoiceDao().getInvoiceWithPages(item.entityId)
-                        if (iwp != null && storage != null) {
+                        if (iwp != null) {
+                            val activeStorage = storage
+                                ?: throw IllegalStateException("Firebase Cloud Storage is unavailable; retry upload when connected.")
                             val inv = iwp.invoice
-                            val updatedPages = mutableListOf<InvoicePageEntity>()
+                            if (iwp.sortedPages.isEmpty()) {
+                                throw InvoiceUploadException(
+                                    InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS,
+                                    "Invoice #${inv.invoiceNumber} has no pages to upload."
+                                )
+                            }
+
+                            suspend fun uploadVerifiedAttachment(
+                                storagePath: String,
+                                validated: ValidatedAttachment,
+                                immutable: Boolean
+                            ): String {
+                                val ref = activeStorage.reference.child(storagePath)
+                                if (immutable) {
+                                    // Idempotent retry: if immutable file already reached Storage on a prior
+                                    // interrupted attempt with matching byte size & sha256, reuse it without overwriting.
+                                    val existingMeta = runCatching { ref.metadata.await() }.getOrNull()
+                                    if (existingMeta != null && existingMeta.sizeBytes == validated.byteSize) {
+                                        val remoteSha = existingMeta.getCustomMetadata("sha256")
+                                        if (remoteSha.isNullOrBlank() || remoteSha.equals(validated.sha256, ignoreCase = true)) {
+                                            return storagePath
+                                        }
+                                    }
+                                }
+                                val meta = StorageMetadata.Builder()
+                                    .setContentType(validated.contentType)
+                                    .setCustomMetadata("sha256", validated.sha256)
+                                    .build()
+                                val snap = ref.putFile(Uri.fromFile(validated.file), meta).await()
+                                if (snap.bytesTransferred < validated.byteSize) {
+                                    throw IllegalStateException(
+                                        "Incomplete upload for $storagePath (${snap.bytesTransferred}/${validated.byteSize} bytes)."
+                                    )
+                                }
+                                return storagePath
+                            }
+
                             for (page in iwp.sortedPages) {
                                 var origRemote = page.originalStoragePath
                                 var editRemote = page.editedStoragePath
-                                if (origRemote == null) {
-                                    val origFile = File(page.originalLocalPath)
-                                    if (origFile.exists() && origFile.length() <= MAX_INVOICE_FILE_BYTES) {
-                                        val path = "companies/${inv.companyId}/invoices/${inv.id}/orig_${page.id}.jpg"
-                                        val meta = StorageMetadata.Builder().setContentType(page.mimeType).build()
-                                        storage.reference.child(path).putFile(Uri.fromFile(origFile), meta).await()
-                                        origRemote = path
-                                    }
+                                if (origRemote.isNullOrBlank()) {
+                                    val validatedOrig = InvoiceSyncValidator.validateLocalAttachment(
+                                        localPath = page.originalLocalPath,
+                                        label = "invoice #${inv.invoiceNumber} page ${page.pageIndex + 1} original",
+                                        expectedMimeType = page.mimeType.ifBlank { "image/jpeg" },
+                                        expectedSha256 = page.originalSha256,
+                                        maxBytes = MAX_INVOICE_FILE_BYTES
+                                    )
+                                    val ext = if (validatedOrig.contentType == "image/png") "png" else "jpg"
+                                    val path = "companies/${inv.companyId}/invoices/${inv.id}/orig_${page.id}.$ext"
+                                    origRemote = uploadVerifiedAttachment(path, validatedOrig, immutable = true)
+                                    db.invoiceDao().upsertPages(listOf(page.copy(originalStoragePath = origRemote)))
                                 }
-                                if (editRemote == null) {
-                                    val editFile = File(page.editedLocalPath)
-                                    if (editFile.exists() && editFile.length() <= MAX_INVOICE_FILE_BYTES) {
-                                        val path = "companies/${inv.companyId}/invoices/${inv.id}/edit_${page.id}.jpg"
-                                        val meta = StorageMetadata.Builder().setContentType("image/jpeg").build()
-                                        storage.reference.child(path).putFile(Uri.fromFile(editFile), meta).await()
-                                        editRemote = path
-                                    }
+                                if (editRemote.isNullOrBlank()) {
+                                    val validatedEdit = InvoiceSyncValidator.validateLocalAttachment(
+                                        localPath = page.editedLocalPath,
+                                        label = "invoice #${inv.invoiceNumber} page ${page.pageIndex + 1} edited",
+                                        expectedMimeType = "image/jpeg",
+                                        expectedSha256 = page.editedSha256,
+                                        maxBytes = MAX_INVOICE_FILE_BYTES
+                                    )
+                                    val path = "companies/${inv.companyId}/invoices/${inv.id}/edit_${page.id}.jpg"
+                                    editRemote = uploadVerifiedAttachment(path, validatedEdit, immutable = false)
+                                    db.invoiceDao().upsertPages(
+                                        listOf(page.copy(originalStoragePath = origRemote, editedStoragePath = editRemote))
+                                    )
                                 }
-                                updatedPages += page.copy(
-                                    originalStoragePath = origRemote,
-                                    editedStoragePath = editRemote
-                                )
                             }
-                            if (updatedPages.isNotEmpty()) {
-                                db.invoiceDao().upsertPages(updatedPages)
-                            }
+
                             var sigRemote = inv.signatureStoragePath
-                            if (inv.signed && sigRemote == null && !inv.signatureLocalPath.isNullOrBlank()) {
-                                val f = File(inv.signatureLocalPath)
-                                if (f.exists()) {
-                                    val path = "companies/${inv.companyId}/invoices/${inv.id}/signature.png"
-                                    val meta = StorageMetadata.Builder().setContentType("image/png").build()
-                                    storage.reference.child(path).putFile(Uri.fromFile(f), meta).await()
-                                    sigRemote = path
-                                }
-                            }
-                            var pdfRemote = inv.signedPdfStoragePath
-                            if (inv.signed && pdfRemote == null && !inv.signedPdfLocalPath.isNullOrBlank()) {
-                                val f = File(inv.signedPdfLocalPath)
-                                if (f.exists()) {
-                                    val path = "companies/${inv.companyId}/invoices/${inv.id}/signed_v${inv.version}.pdf"
-                                    val meta = StorageMetadata.Builder().setContentType("application/pdf").build()
-                                    storage.reference.child(path).putFile(Uri.fromFile(f), meta).await()
-                                    pdfRemote = path
-                                }
-                            }
-                            db.invoiceDao().upsertInvoice(
-                                inv.copy(
-                                    signatureStoragePath = sigRemote,
-                                    signedPdfStoragePath = pdfRemote
+                            if (inv.signed && sigRemote.isNullOrBlank()) {
+                                val validatedSig = InvoiceSyncValidator.validateLocalAttachment(
+                                    localPath = inv.signatureLocalPath,
+                                    label = "invoice #${inv.invoiceNumber} signature",
+                                    expectedMimeType = "image/png",
+                                    expectedSha256 = null,
+                                    maxBytes = MAX_INVOICE_FILE_BYTES
                                 )
-                            )
+                                val path = "companies/${inv.companyId}/invoices/${inv.id}/signature.png"
+                                sigRemote = uploadVerifiedAttachment(path, validatedSig, immutable = true)
+                                db.invoiceDao().upsertInvoice(inv.copy(signatureStoragePath = sigRemote))
+                            }
+
+                            var pdfRemote = inv.signedPdfStoragePath
+                            if (inv.signed && pdfRemote.isNullOrBlank()) {
+                                val validatedPdf = InvoiceSyncValidator.validateLocalAttachment(
+                                    localPath = inv.signedPdfLocalPath,
+                                    label = "invoice #${inv.invoiceNumber} signed PDF",
+                                    expectedMimeType = "application/pdf",
+                                    expectedSha256 = inv.signedPdfSha256,
+                                    maxBytes = MAX_INVOICE_FILE_BYTES
+                                )
+                                val path = "companies/${inv.companyId}/invoices/${inv.id}/signed_v${inv.version}.pdf"
+                                pdfRemote = uploadVerifiedAttachment(path, validatedPdf, immutable = true)
+                                db.invoiceDao().upsertInvoice(
+                                    inv.copy(
+                                        signatureStoragePath = sigRemote,
+                                        signedPdfStoragePath = pdfRemote,
+                                        signedPdfSha256 = validatedPdf.sha256
+                                    )
+                                )
+                            }
                         }
                     }
 
@@ -682,58 +731,35 @@ class CloudSyncManager(
                         val iwp = db.invoiceDao().getInvoiceWithPages(item.entityId)
                         if (iwp != null) {
                             val inv = iwp.invoice
+                            // Never allow an invoice with missing remote files to be written as SYNCHRONIZED
+                            InvoiceSyncValidator.assertInvoiceReadyForMetadataSync(iwp)
+
                             val finalStatus = when {
                                 inv.status == InvoiceStatus.VOIDED -> InvoiceStatus.VOIDED
                                 inv.signed -> InvoiceStatus.SYNCHRONIZED
                                 else -> InvoiceStatus.NOT_SIGNED
                             }
-                            val payload = mutableMapOf<String, Any?>(
-                                "id" to inv.id,
-                                "companyId" to inv.companyId,
-                                "jobId" to inv.jobId,
-                                "storeId" to inv.storeId,
-                                "storeName" to inv.storeName,
-                                "invoiceNumber" to inv.invoiceNumber,
-                                "notes" to inv.notes,
-                                "status" to finalStatus,
-                                "version" to inv.version,
-                                "supersedesInvoiceId" to inv.supersedesInvoiceId,
-                                "voidedReason" to inv.voidedReason,
-                                "createdByUid" to inv.createdByUid,
-                                "createdByName" to inv.createdByName,
-                                "assignedDriverUid" to inv.assignedDriverUid,
-                                "createdAt" to inv.createdAt,
-                                "modifiedAt" to inv.modifiedAt,
-                                "signed" to inv.signed,
-                                "recipientName" to inv.recipientName,
-                                "recipientTitle" to inv.recipientTitle,
-                                "acknowledgmentConfirmed" to inv.acknowledgmentConfirmed,
-                                "signatureStoragePath" to inv.signatureStoragePath,
-                                "signaturePageIndex" to inv.signaturePageIndex,
-                                "signaturePosX" to inv.signaturePosX,
-                                "signaturePosY" to inv.signaturePosY,
-                                "signedLocalAt" to inv.signedLocalAt,
-                                "signedPdfStoragePath" to inv.signedPdfStoragePath,
-                                "signedPdfSha256" to inv.signedPdfSha256,
-                                "totalBytes" to inv.totalBytes,
-                                "serverUpdatedAt" to FieldValue.serverTimestamp(),
-                                "pages" to iwp.sortedPages.map { p ->
-                                    mapOf(
-                                        "id" to p.id,
-                                        "pageIndex" to p.pageIndex,
-                                        "originalStoragePath" to p.originalStoragePath,
-                                        "editedStoragePath" to p.editedStoragePath,
-                                        "originalSha256" to p.originalSha256,
-                                        "editedSha256" to p.editedSha256,
-                                        "byteSize" to p.byteSize
-                                    )
+                            val invRef = companyRef.collection("invoices").document(inv.id)
+
+                            if (inv.status == InvoiceStatus.VOIDED && inv.signed) {
+                                // Match strict Firestore immutability rule: voiding touches only approved keys
+                                val existingRemote = runCatching { invRef.get().await() }.getOrNull()
+                                if (existingRemote != null && existingRemote.exists() && existingRemote.getBoolean("signed") == true) {
+                                    invRef.update(
+                                        mapOf(
+                                            "status" to InvoiceStatus.VOIDED,
+                                            "voidedReason" to (inv.voidedReason ?: "Voided"),
+                                            "modifiedAt" to inv.modifiedAt,
+                                            "serverUpdatedAt" to FieldValue.serverTimestamp()
+                                        )
+                                    ).await()
+                                } else {
+                                    invRef.set(buildFullInvoicePayload(iwp, finalStatus), SetOptions.merge()).await()
                                 }
-                            )
-                            if (inv.signed && inv.signedServerAt == null) {
-                                payload["signedServerAt"] = FieldValue.serverTimestamp()
+                            } else {
+                                invRef.set(buildFullInvoicePayload(iwp, finalStatus), SetOptions.merge()).await()
                             }
-                            companyRef.collection("invoices").document(inv.id)
-                                .set(payload, SetOptions.merge()).await()
+
                             val confirmedNow = System.currentTimeMillis()
                             db.invoiceDao().updateSyncAndStatus(
                                 invoiceId = inv.id,
@@ -777,14 +803,43 @@ class CloudSyncManager(
                 if (item.entityType == "invoice_file") {
                     failedInvoiceFileIds += item.entityId
                 }
-                Log.w(TAG, "Sync failed for ${item.entityType}/${item.entityId}: ${e.message}")
+                val formattedError = if (e is InvoiceUploadException) {
+                    "[${e.code.name}] ${e.message}"
+                } else {
+                    e.message ?: "Sync failed"
+                }
+                Log.w(TAG, "Sync failed for ${item.entityType}/${item.entityId}: $formattedError")
+
+                // Self-healing recovery: if invoice metadata ran after a crash before its binaries finished,
+                // re-enqueue the binary upload so the next sync cycle uploads missing attachments first.
+                if (item.entityType == "invoice" &&
+                    e is InvoiceUploadException &&
+                    e.code == InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS
+                ) {
+                    db.syncQueueDao().upsert(
+                        com.delifar.app.data.SyncQueueEntity(
+                            id = "invoice_file:${item.entityId}",
+                            companyId = item.companyId,
+                            entityType = "invoice_file",
+                            entityId = item.entityId,
+                            operation = "upload_file",
+                            status = SyncState.PENDING,
+                            createdAt = System.currentTimeMillis(),
+                            nextAttemptAt = System.currentTimeMillis()
+                        )
+                    )
+                }
+
                 val nextRetries = item.retryCount + 1
-                val backoffMs = (30_000L * (1L shl nextRetries.coerceAtMost(6)))
+                val isPermanentFileError = e is InvoiceUploadException &&
+                    e.code != InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS
+                val baseBackoffMs = if (isPermanentFileError) 5L * 60_000L else 30_000L
+                val backoffMs = (baseBackoffMs * (1L shl nextRetries.coerceAtMost(4))).coerceAtMost(60L * 60_000L)
                 db.syncQueueDao().upsert(
                     item.copy(
                         retryCount = nextRetries,
                         status = SyncState.FAILED,
-                        lastError = e.message ?: "Sync failed",
+                        lastError = formattedError,
                         nextAttemptAt = System.currentTimeMillis() + backoffMs
                     )
                 )
@@ -795,10 +850,10 @@ class CloudSyncManager(
                         status = InvoiceStatus.UPLOAD_FAILED,
                         serverTs = null,
                         signedServerTs = null,
-                        error = e.message ?: "Upload failed"
+                        error = formattedError
                     )
                 }
-                _syncState.value = _syncState.value.copy(lastError = e.message)
+                _syncState.value = _syncState.value.copy(lastError = formattedError)
             }
         }
 
@@ -808,6 +863,57 @@ class CloudSyncManager(
             lastSyncedAt = if (allSucceeded) System.currentTimeMillis() else _syncState.value.lastSyncedAt
         )
         return allSucceeded
+    }
+
+    private fun buildFullInvoicePayload(iwp: InvoiceWithPages, finalStatus: String): MutableMap<String, Any?> {
+        val inv = iwp.invoice
+        return mutableMapOf(
+            "id" to inv.id,
+            "companyId" to inv.companyId,
+            "jobId" to inv.jobId,
+            "storeId" to inv.storeId,
+            "storeName" to inv.storeName,
+            "invoiceNumber" to inv.invoiceNumber,
+            "notes" to inv.notes,
+            "status" to finalStatus,
+            "version" to inv.version,
+            "supersedesInvoiceId" to inv.supersedesInvoiceId,
+            "voidedReason" to inv.voidedReason,
+            "createdByUid" to inv.createdByUid,
+            "createdByName" to inv.createdByName,
+            "assignedDriverUid" to inv.assignedDriverUid,
+            "createdAt" to inv.createdAt,
+            "modifiedAt" to inv.modifiedAt,
+            "signed" to inv.signed,
+            "recipientName" to inv.recipientName,
+            "recipientTitle" to inv.recipientTitle,
+            "acknowledgmentConfirmed" to inv.acknowledgmentConfirmed,
+            "signatureStoragePath" to inv.signatureStoragePath,
+            "signaturePageIndex" to inv.signaturePageIndex,
+            "signaturePosX" to inv.signaturePosX,
+            "signaturePosY" to inv.signaturePosY,
+            "signedLocalAt" to inv.signedLocalAt,
+            "signedServerAt" to if (inv.signed) FieldValue.serverTimestamp() else null,
+            "signedPdfStoragePath" to inv.signedPdfStoragePath,
+            "signedPdfSha256" to inv.signedPdfSha256,
+            "totalBytes" to inv.totalBytes,
+            "serverUpdatedAt" to FieldValue.serverTimestamp(),
+            "pages" to iwp.sortedPages.map { pg ->
+                mapOf(
+                    "id" to pg.id,
+                    "pageIndex" to pg.pageIndex,
+                    "originalStoragePath" to pg.originalStoragePath,
+                    "editedStoragePath" to pg.editedStoragePath,
+                    "originalSha256" to pg.originalSha256,
+                    "editedSha256" to pg.editedSha256,
+                    "rotationDegrees" to pg.rotationDegrees,
+                    "contrastBoost" to pg.contrastBoost,
+                    "cropInsetPercent" to pg.cropInsetPercent,
+                    "byteSize" to pg.byteSize,
+                    "mimeType" to pg.mimeType
+                )
+            }
+        )
     }
 
     /**

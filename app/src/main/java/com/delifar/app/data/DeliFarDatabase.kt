@@ -103,11 +103,22 @@ interface StoreDao {
     fun observeStoreWithHours(storeId: String): Flow<StoreWithHours?>
 
     @Transaction
+    @Query("SELECT * FROM stores WHERE companyId = :companyId AND id = :storeId")
+    fun observeStoreWithHoursInCompany(companyId: String, storeId: String): Flow<StoreWithHours?>
+
+    @Transaction
     @Query("SELECT * FROM stores WHERE id = :storeId")
     suspend fun getStoreWithHours(storeId: String): StoreWithHours?
 
+    @Transaction
+    @Query("SELECT * FROM stores WHERE companyId = :companyId AND id = :storeId")
+    suspend fun getStoreWithHoursInCompany(companyId: String, storeId: String): StoreWithHours?
+
     @Query("SELECT * FROM stores WHERE id = :storeId")
     suspend fun getStore(storeId: String): StoreEntity?
+
+    @Query("SELECT * FROM stores WHERE companyId = :companyId AND id = :storeId")
+    suspend fun getStoreInCompany(companyId: String, storeId: String): StoreEntity?
 
     @Query("SELECT * FROM stores WHERE providerId = :providerId LIMIT 1")
     suspend fun findByProviderId(providerId: String): StoreEntity?
@@ -183,8 +194,16 @@ interface JobDao {
     fun observeJobWithItems(jobId: String): Flow<JobWithItems?>
 
     @Transaction
+    @Query("SELECT * FROM jobs WHERE companyId = :companyId AND id = :jobId")
+    fun observeJobWithItemsInCompany(companyId: String, jobId: String): Flow<JobWithItems?>
+
+    @Transaction
     @Query("SELECT * FROM jobs WHERE id = :jobId")
     suspend fun getJobWithItems(jobId: String): JobWithItems?
+
+    @Transaction
+    @Query("SELECT * FROM jobs WHERE companyId = :companyId AND id = :jobId")
+    suspend fun getJobWithItemsInCompany(companyId: String, jobId: String): JobWithItems?
 
     @Transaction
     @Query("SELECT * FROM jobs WHERE companyId = :companyId ORDER BY id ASC")
@@ -244,12 +263,28 @@ interface InvoiceDao {
     fun observeInvoicesForJob(jobId: String): Flow<List<InvoiceWithPages>>
 
     @Transaction
+    @Query("SELECT * FROM invoices WHERE companyId = :companyId ORDER BY createdAt DESC")
+    suspend fun getInvoicesWithPagesByCompany(companyId: String): List<InvoiceWithPages>
+
+    @Transaction
+    @Query("SELECT * FROM invoices ORDER BY createdAt DESC")
+    suspend fun getAllInvoicesWithPages(): List<InvoiceWithPages>
+
+    @Transaction
     @Query("SELECT * FROM invoices WHERE id = :invoiceId")
     fun observeInvoice(invoiceId: String): Flow<InvoiceWithPages?>
 
     @Transaction
+    @Query("SELECT * FROM invoices WHERE companyId = :companyId AND id = :invoiceId")
+    fun observeInvoiceInCompany(companyId: String, invoiceId: String): Flow<InvoiceWithPages?>
+
+    @Transaction
     @Query("SELECT * FROM invoices WHERE id = :invoiceId")
     suspend fun getInvoiceWithPages(invoiceId: String): InvoiceWithPages?
+
+    @Transaction
+    @Query("SELECT * FROM invoices WHERE companyId = :companyId AND id = :invoiceId")
+    suspend fun getInvoiceWithPagesInCompany(companyId: String, invoiceId: String): InvoiceWithPages?
 
     @Query("SELECT * FROM invoices WHERE companyId = ''")
     suspend fun getUnmigratedInvoices(): List<InvoiceEntity>
@@ -417,7 +452,7 @@ interface SearchCacheDao {
         ReceiptEntity::class,
         SearchCacheEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class DeliFarDatabase : RoomDatabase() {
@@ -709,6 +744,25 @@ abstract class DeliFarDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Flag legacy stores whose coordinates match the old silent downtown LA default (34.0522, -118.2437)
+                // or invalid Null Island (0.0, 0.0) so users are prompted to review & confirm their pin.
+                // Never delete or move existing store records.
+                db.execSQL(
+                    """
+                    UPDATE `stores`
+                    SET `locationConfirmed` = 0
+                    WHERE `geocodeSource` = 'legacy'
+                      AND (
+                        (ABS(`lat` - 34.0522) <= 0.0015 AND ABS(`lon` - (-118.2437)) <= 0.0015)
+                        OR (ABS(`lat`) < 0.0001 AND ABS(`lon`) < 0.0001)
+                      )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): DeliFarDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -716,7 +770,14 @@ abstract class DeliFarDatabase : RoomDatabase() {
                     DeliFarDatabase::class.java,
                     "delifar.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(
+                        MIGRATION_1_2,
+                        MIGRATION_2_3,
+                        MIGRATION_3_4,
+                        MIGRATION_4_5,
+                        MIGRATION_5_6,
+                        MIGRATION_6_7
+                    )
                     .build()
                     .also { INSTANCE = it }
             }
