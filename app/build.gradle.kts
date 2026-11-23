@@ -127,20 +127,29 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
 
-// Reproducibly prefetch Robolectric 4.14.1 Android 14 (SDK 34) instrumented runtime JAR via Gradle/Maven Central
+// Reproducibly prefetch Robolectric 4.14.1 Android instrumented runtime JARs via Gradle/Maven Central
 // so unit tests run deterministically offline without invoking Robolectric's runtime MavenArtifactFetcher.
-val robolectricSdk by configurations.creating {
+// Separate configurations prevent Gradle from resolving a version conflict between two versions of the same
+// org.robolectric:android-all-instrumented coordinate:
+//   - SDK 34 satisfies @Config(sdk = [34])
+//   - SDK 35 (Robolectric 4.14.1 max SDK) satisfies app resource loading when compileSdk/targetSdk >= 35
+val robolectricSdk34 by configurations.creating {
+    isTransitive = false
+}
+val robolectricSdk35 by configurations.creating {
     isTransitive = false
 }
 
 dependencies {
-    robolectricSdk("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
+    robolectricSdk34("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
+    robolectricSdk35("org.robolectric:android-all-instrumented:15-robolectric-12650502-i7")
 }
 
 val robolectricDepsDir = layout.buildDirectory.dir("robolectric-deps")
 
 val syncRobolectricSdkJars by tasks.registering(Sync::class) {
-    from(robolectricSdk)
+    from(robolectricSdk34)
+    from(robolectricSdk35)
     into(robolectricDepsDir)
 }
 

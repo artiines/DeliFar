@@ -73,7 +73,7 @@ jobs:
             echo "GOOGLE_SERVICES_JSON_BASE64 not set; building with offline-first Room mode enabled."
           fi
 
-      - name: Run unit, Room migration & Robolectric tests (offline Gradle-cached SDK 34)
+      - name: Run unit, Room migration & Robolectric tests (offline Gradle-cached SDK 34 & 35)
         run: ./gradlew :app:testDebugUnitTest --stacktrace
 
       - name: Run Android Lint

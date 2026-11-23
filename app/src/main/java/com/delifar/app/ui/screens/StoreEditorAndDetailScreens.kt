@@ -839,17 +839,54 @@ fun StoreDetailScreen(
                             )
                         }
 
+                        if (!swh.store.locationConfirmed) {
+                            Surface(
+                                color = AmberContainer,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = "Pin Review Required",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = AmberAccent,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "This store has unverified legacy coordinates. Confirm the pin on the map before starting turn-by-turn navigation.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    if (canManage) {
+                                        Button(onClick = { onEditStore(swh.store.id) }) {
+                                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text("Review & Confirm Pin")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
                                 onClick = {
-                                    val ok = launchDirections(
-                                        context,
-                                        swh.store.lat,
-                                        swh.store.lon,
-                                        swh.store.name,
-                                        swh.store.address
-                                    )
-                                    if (!ok) viewModel.notifyMessage(invalidCoordMsg)
+                                    if (!swh.store.locationConfirmed) {
+                                        viewModel.notifyMessage("Please review and confirm this store's pin before navigating.")
+                                        if (canManage) onEditStore(swh.store.id)
+                                    } else {
+                                        val ok = launchDirections(
+                                            context,
+                                            swh.store.lat,
+                                            swh.store.lon,
+                                            swh.store.name,
+                                            swh.store.address
+                                        )
+                                        if (!ok) viewModel.notifyMessage(invalidCoordMsg)
+                                    }
                                 },
                                 modifier = Modifier.weight(1f)
                             ) {

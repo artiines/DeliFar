@@ -72,6 +72,8 @@ import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.launchDialer
 import com.delifar.app.ui.components.launchDirections
 import com.delifar.app.ui.components.todayHoursSummary
+import com.delifar.app.ui.theme.AmberAccent
+import com.delifar.app.ui.theme.AmberContainer
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
 import java.time.ZoneId
@@ -127,11 +129,16 @@ fun MapScreen(
         if (defaultArea == SearchArea.SAC) GeoPoint(38.5816, -121.4944) else GeoPoint(34.0522, -118.2437)
     }
 
+    val unconfirmedCount = remember(visibleStores) {
+        visibleStores.count { !it.store.locationConfirmed }
+    }
+
     val mapPins = remember(visibleStores, jobsByStore, today) {
         visibleStores.filter { GeoValidation.isValidCoordinate(it.store.lat, it.store.lon) }.map { swh ->
             val jobsHere = jobsByStore[swh.store.id].orEmpty()
             val hasOverdue = jobsHere.any { BusinessRules.isOverdue(it.job.date, it.job.status, today) }
             val colorHex = when {
+                !swh.store.locationConfirmed -> "#D97706"
                 hasOverdue -> "#DC2626"
                 jobsHere.isNotEmpty() -> "#0284C7"
                 else -> "#183A37"
@@ -145,6 +152,12 @@ fun MapScreen(
                 activeJobCount = jobsHere.size
             )
         }
+    }
+
+    val confirmedRouteStops = remember(visibleStores) {
+        visibleStores
+            .filter { it.store.locationConfirmed && GeoValidation.isValidCoordinate(it.store.lat, it.store.lon) }
+            .map { GeoPoint(it.store.lat, it.store.lon) }
     }
 
     val activeStyleUrl = remember(prefs.mapStyleUrl, minimalStyle) {
@@ -219,6 +232,23 @@ fun MapScreen(
                 )
             }
 
+            if (unconfirmedCount > 0) {
+                Surface(
+                    color = AmberContainer,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = "$unconfirmedCount legacy store pin(s) need review before navigation (shown in amber).",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AmberAccent,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+
             if (listMode) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -242,14 +272,19 @@ fun MapScreen(
                                 zoneId = zoneId,
                                 onOpenStore = { onOpenStore(swh.store.id) },
                                 onDirections = {
-                                    val launched = launchDirections(
-                                        context,
-                                        swh.store.lat,
-                                        swh.store.lon,
-                                        swh.store.name,
-                                        swh.store.address
-                                    )
-                                    if (!launched) viewModel.notifyMessage(invalidCoordMsg)
+                                    if (!swh.store.locationConfirmed) {
+                                        viewModel.notifyMessage("Review and confirm this store's pin before starting navigation.")
+                                        onOpenStore(swh.store.id)
+                                    } else {
+                                        val launched = launchDirections(
+                                            context,
+                                            swh.store.lat,
+                                            swh.store.lon,
+                                            swh.store.name,
+                                            swh.store.address
+                                        )
+                                        if (!launched) viewModel.notifyMessage(invalidCoordMsg)
+                                    }
                                 },
                                 onCall = { launchDialer(context, swh.store.phone) }
                             )
@@ -271,7 +306,7 @@ fun MapScreen(
                     )
 
                     // Optimize Multi-Stop Route overlay (OSRM when configured, or Offline Stop Order)
-                    if (mapPins.size >= 2) {
+                    if (confirmedRouteStops.size >= 2) {
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
@@ -301,14 +336,22 @@ fun MapScreen(
                                     val mins = r.durationSeconds / 60
                                     Column {
                                         Text(
-                                            text = "%.1f mi • %d min".format(mi, mins),
+                                            text = if (r.isStreetRoute) {
+                                                "Street route: %.1f mi • %d min".format(mi, mins)
+                                            } else {
+                                                "Approx. straight-line: %.1f mi • %d min".format(mi, mins)
+                                            },
                                             style = MaterialTheme.typography.labelLarge,
                                             fontWeight = FontWeight.SemiBold
                                         )
                                         Text(
-                                            text = r.sourceLabel,
+                                            text = if (r.isStreetRoute) {
+                                                r.sourceLabel
+                                            } else {
+                                                "Offline stop order (not street routing) • Configure OSRM in Settings"
+                                            },
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            color = if (r.isStreetRoute) MaterialTheme.colorScheme.onSurfaceVariant else AmberAccent
                                         )
                                     }
                                     IconButton(
@@ -324,8 +367,7 @@ fun MapScreen(
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.clickable {
-                                            val stops = mapPins.map { GeoPoint(it.lat, it.lon) }
-                                            viewModel.optimizeRouteForStops(stops)
+                                            viewModel.optimizeRouteForStops(confirmedRouteStops)
                                         }
                                     )
                                 }
@@ -396,23 +438,36 @@ fun MapScreen(
                                     color = MaterialTheme.colorScheme.primary
                                 )
 
+                                if (!selectedStore.store.locationConfirmed) {
+                                    StatusTag(
+                                        text = "Review Pin before navigation",
+                                        bg = AmberContainer,
+                                        fg = AmberAccent
+                                    )
+                                }
+
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Button(
                                         onClick = {
-                                            val ok = launchDirections(
-                                                context,
-                                                selectedStore.store.lat,
-                                                selectedStore.store.lon,
-                                                selectedStore.store.name,
-                                                selectedStore.store.address
-                                            )
-                                            if (!ok) viewModel.notifyMessage(invalidCoordMsg)
+                                            if (!selectedStore.store.locationConfirmed) {
+                                                viewModel.notifyMessage("Confirm this store's pin in Store Details before starting navigation.")
+                                                onOpenStore(selectedStore.store.id)
+                                            } else {
+                                                val ok = launchDirections(
+                                                    context,
+                                                    selectedStore.store.lat,
+                                                    selectedStore.store.lon,
+                                                    selectedStore.store.name,
+                                                    selectedStore.store.address
+                                                )
+                                                if (!ok) viewModel.notifyMessage(invalidCoordMsg)
+                                            }
                                         },
                                         modifier = Modifier.weight(1f)
                                     ) {
                                         Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(4.dp))
-                                        Text(lStr(R.string.directions))
+                                        Text(if (selectedStore.store.locationConfirmed) lStr(R.string.directions) else "Review Pin")
                                     }
                                     if (selectedStore.store.phone.isNotBlank()) {
                                         OutlinedButton(

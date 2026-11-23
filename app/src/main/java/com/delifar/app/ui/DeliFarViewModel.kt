@@ -30,9 +30,12 @@ import com.delifar.app.data.StoreHoursEntity
 import com.delifar.app.data.StoreWithHours
 import com.delifar.app.documents.SignatureStrokePoint
 import com.delifar.app.documents.SignedPdfGenerator
+import com.delifar.app.domain.ArchiveImportPreview
 import com.delifar.app.domain.BackupManager
 import com.delifar.app.domain.BusinessRules
+import com.delifar.app.domain.EncryptedArchiveBackupManager
 import com.delifar.app.domain.ImportPreview
+import java.io.File
 import com.delifar.app.network.AddressGeocoderService
 import com.delifar.app.network.ComputedRouteResult
 import com.delifar.app.network.GeoPoint
@@ -78,6 +81,7 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     private val db = DeliFarDatabase.getInstance(appContext)
     val repository = DeliFarRepository(db)
     val backupManager = BackupManager(db)
+    val encryptedBackupManager = EncryptedArchiveBackupManager(db)
     val syncManager = CloudSyncManager(appContext, db, repository)
 
     val geocoderService = AddressGeocoderService(appContext, repository)
@@ -144,6 +148,14 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     private val _importPreview = MutableStateFlow<ImportPreview?>(null)
     val importPreview: StateFlow<ImportPreview?> = _importPreview.asStateFlow()
 
+    private val _pendingEncryptedArchiveFile = MutableStateFlow<File?>(null)
+    val pendingEncryptedArchiveFile: StateFlow<File?> = _pendingEncryptedArchiveFile.asStateFlow()
+
+    private val _archiveImportPreview = MutableStateFlow<ArchiveImportPreview?>(null)
+    val archiveImportPreview: StateFlow<ArchiveImportPreview?> = _archiveImportPreview.asStateFlow()
+
+    private var pendingArchivePassphrase: String = ""
+
     private val _pendingMigration = MutableStateFlow<MigrationSummary?>(null)
     val pendingMigration: StateFlow<MigrationSummary?> = _pendingMigration.asStateFlow()
 
@@ -170,11 +182,14 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         super.onCleared()
     }
 
-    fun observeStore(storeId: String): Flow<StoreWithHours?> = repository.observeStore(storeId)
-    fun observeJob(jobId: String): Flow<JobWithItems?> = repository.observeJobWithItems(jobId)
+    fun observeStore(storeId: String): Flow<StoreWithHours?> =
+        repository.observeStore(storeId, preferences.value.activeCompanyId)
+    fun observeJob(jobId: String): Flow<JobWithItems?> =
+        repository.observeJobWithItems(jobId, preferences.value.activeCompanyId)
     fun observeInvoicesForJob(jobId: String): Flow<List<InvoiceWithPages>> =
         repository.observeInvoicesForJob(jobId, preferences.value.activeCompanyId)
-    fun observeInvoice(invoiceId: String): Flow<InvoiceWithPages?> = repository.observeInvoice(invoiceId)
+    fun observeInvoice(invoiceId: String): Flow<InvoiceWithPages?> =
+        repository.observeInvoice(invoiceId, preferences.value.activeCompanyId)
 
     fun notifyMessage(msg: String) {
         _messages.tryEmit(msg)
@@ -347,7 +362,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun updateEmployeeRole(targetUid: String, newRole: String) {
         viewModelScope.launch {
             val p = preferences.value
-            val res = repository.updateEmployeeRole(targetUid, newRole, p.activeUserUid, p.activeUserName, p.activeUserRole)
+            val res = repository.updateEmployeeRole(
+                targetUid, newRole, p.activeUserUid, p.activeUserName, p.activeUserRole, p.activeCompanyId
+            )
             res.onFailure { notifyMessage(it.message ?: "Could not update role.") }
             res.onSuccess {
                 CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -359,7 +376,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun setEmployeeActive(targetUid: String, active: Boolean) {
         viewModelScope.launch {
             val p = preferences.value
-            val res = repository.setEmployeeActive(targetUid, active, p.activeUserUid, p.activeUserName, p.activeUserRole)
+            val res = repository.setEmployeeActive(
+                targetUid, active, p.activeUserUid, p.activeUserName, p.activeUserRole, p.activeCompanyId
+            )
             res.onFailure { notifyMessage(it.message ?: "Could not update employee status.") }
             res.onSuccess {
                 CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -544,7 +563,7 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun archiveStore(storeId: String, blockedMsg: String) {
         viewModelScope.launch {
             val p = preferences.value
-            val res = repository.archiveStore(storeId, p.activeUserUid, p.activeUserName, p.activeUserRole)
+            val res = repository.archiveStore(storeId, p.activeUserUid, p.activeUserName, p.activeUserRole, p.activeCompanyId)
             if (res.isFailure) {
                 notifyMessage(if (res.exceptionOrNull()?.message == "ACTIVE_JOBS") blockedMsg else res.exceptionOrNull()?.message ?: blockedMsg)
             } else {
@@ -556,7 +575,7 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun restoreStore(storeId: String) {
         viewModelScope.launch {
             val p = preferences.value
-            repository.restoreStore(storeId, p.activeUserUid, p.activeUserName, p.activeUserRole)
+            repository.restoreStore(storeId, p.activeUserUid, p.activeUserName, p.activeUserRole, p.activeCompanyId)
             CloudSyncManager.scheduleBackgroundSync(appContext)
         }
     }
@@ -610,7 +629,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun assignDriverToJob(jobId: String, driverUid: String?, driverName: String) {
         viewModelScope.launch {
             val p = preferences.value
-            val res = repository.assignDriverToJob(jobId, driverUid, driverName, p.activeUserUid, p.activeUserName, p.activeUserRole)
+            val res = repository.assignDriverToJob(
+                jobId, driverUid, driverName, p.activeUserUid, p.activeUserName, p.activeUserRole, p.activeCompanyId
+            )
             res.onFailure { notifyMessage(it.message ?: "Could not assign driver.") }
             res.onSuccess {
                 CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -622,7 +643,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun updateJobStatus(jobId: String, newStatus: String) {
         viewModelScope.launch {
             val p = preferences.value
-            val res = repository.updateJobStatus(jobId, newStatus, p.activeUserUid, p.activeUserName, p.activeUserRole)
+            val res = repository.updateJobStatus(
+                jobId, newStatus, p.activeUserUid, p.activeUserName, p.activeUserRole, p.activeCompanyId
+            )
             res.onFailure { notifyMessage(it.message ?: "Could not update job.") }
             res.onSuccess {
                 CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -634,7 +657,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun rescheduleJob(jobId: String, newDate: String, newTime: String?) {
         viewModelScope.launch {
             val p = preferences.value
-            val res = repository.rescheduleJob(jobId, newDate, newTime, p.activeUserUid, p.activeUserName, p.activeUserRole)
+            val res = repository.rescheduleJob(
+                jobId, newDate, newTime, p.activeUserUid, p.activeUserName, p.activeUserRole, p.activeCompanyId
+            )
             res.onFailure { notifyMessage(it.message ?: "Could not reschedule job.") }
             res.onSuccess {
                 CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -645,7 +670,7 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
 
     fun setJobReminderEnabled(jobId: String, enabled: Boolean) {
         viewModelScope.launch {
-            val res = repository.setJobReminderEnabled(jobId, enabled)
+            val res = repository.setJobReminderEnabled(jobId, enabled, preferences.value.activeCompanyId)
             res.onSuccess { rebuildReminders() }
         }
     }
@@ -668,7 +693,8 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
                 actualQuantitiesByItemId = actuals,
                 actorUid = p.activeUserUid,
                 actorName = p.activeUserName,
-                actorRole = p.activeUserRole
+                actorRole = p.activeUserRole,
+                companyId = p.activeCompanyId
             )
             res.onFailure { notifyMessage(it.message ?: "Could not save issue.") }
             res.onSuccess {
@@ -760,7 +786,8 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             signedPdfBytes = generated.totalBytes,
             actorUid = p.activeUserUid,
             actorName = p.activeUserName.ifBlank { "DeliFar Driver" },
-            actorRole = p.activeUserRole
+            actorRole = p.activeUserRole,
+            companyId = p.activeCompanyId
         )
         saveRes.onSuccess {
             CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -772,7 +799,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun voidInvoice(invoiceId: String, reason: String) {
         viewModelScope.launch {
             val p = preferences.value
-            val res = repository.voidInvoice(invoiceId, reason, p.activeUserUid, p.activeUserName, p.activeUserRole)
+            val res = repository.voidInvoice(
+                invoiceId, reason, p.activeUserUid, p.activeUserName, p.activeUserRole, p.activeCompanyId
+            )
             res.onFailure { notifyMessage(it.message ?: "Cannot void invoice.") }
             res.onSuccess {
                 CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -788,7 +817,8 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             correctionNote = correctionNote,
             actorUid = p.activeUserUid,
             actorName = p.activeUserName,
-            actorRole = p.activeUserRole
+            actorRole = p.activeUserRole,
+            companyId = p.activeCompanyId
         )
         res.onSuccess {
             CloudSyncManager.scheduleBackgroundSync(appContext)
@@ -870,6 +900,34 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun exportEncryptedArchiveToUri(uri: Uri, passphrase: String) {
+        viewModelScope.launch {
+            val activeCompanyId = preferences.value.activeCompanyId
+            val res = withContext(Dispatchers.IO) {
+                runCatching {
+                    val tmp = File(appContext.cacheDir, "delifar_export_${System.currentTimeMillis()}.delifarbak")
+                    try {
+                        val summary = encryptedBackupManager.exportEncryptedArchive(activeCompanyId, passphrase, tmp).getOrThrow()
+                        appContext.contentResolver.openOutputStream(uri)?.use { out ->
+                            tmp.inputStream().use { input -> input.copyTo(out) }
+                        } ?: throw IllegalStateException("Cannot open destination file.")
+                        summary
+                    } finally {
+                        runCatching { tmp.delete() }
+                    }
+                }
+            }
+            res.fold(
+                onSuccess = { s ->
+                    notifyMessage(
+                        "Encrypted backup saved (${s.storeCount} stores, ${s.jobCount} jobs, ${s.invoiceCount} invoices, ${s.attachmentCount} files)."
+                    )
+                },
+                onFailure = { notifyMessage("Encrypted backup failed: ${it.message}") }
+            )
+        }
+    }
+
     fun inspectImportUri(uri: Uri) {
         viewModelScope.launch {
             val activeCompanyId = preferences.value.activeCompanyId
@@ -877,18 +935,95 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
                 runCatching {
                     val bytes = appContext.contentResolver.openInputStream(uri)?.use { input ->
                         val data = input.readBytes()
-                        if (data.size > BackupManager.MAX_BYTES) {
-                            throw IllegalArgumentException("Backup file exceeds 50 MiB limit.")
+                        if (data.size > EncryptedArchiveBackupManager.MAX_ARCHIVE_BYTES) {
+                            throw IllegalArgumentException("Backup file exceeds maximum size limit.")
                         }
                         data
                     } ?: throw IllegalStateException("Cannot read selected file.")
-                    val parsed = backupManager.parseAndValidate(String(bytes, Charsets.UTF_8)).getOrThrow()
-                    backupManager.buildPreview(parsed, activeCompanyId)
+
+                    if (EncryptedArchiveBackupManager.isEncryptedArchiveBytes(bytes)) {
+                        val tmp = File(appContext.cacheDir, "delifar_import_${System.currentTimeMillis()}.delifarbak")
+                        tmp.writeBytes(bytes)
+                        Pair<File?, ImportPreview?>(tmp, null)
+                    } else {
+                        if (bytes.size > BackupManager.MAX_BYTES) {
+                            throw IllegalArgumentException("Legacy JSON backup exceeds 50 MiB limit.")
+                        }
+                        val parsed = backupManager.parseAndValidate(String(bytes, Charsets.UTF_8)).getOrThrow()
+                        Pair<File?, ImportPreview?>(null, backupManager.buildPreview(parsed, activeCompanyId))
+                    }
                 }
             }
             res.fold(
-                onSuccess = { preview -> _importPreview.value = preview },
+                onSuccess = { (encFile, jsonPreview) ->
+                    if (encFile != null) {
+                        _pendingEncryptedArchiveFile.value?.let { runCatching { it.delete() } }
+                        _pendingEncryptedArchiveFile.value = encFile
+                    } else if (jsonPreview != null) {
+                        _importPreview.value = jsonPreview
+                    }
+                },
                 onFailure = { err -> notifyMessage("Invalid backup: ${err.message}") }
+            )
+        }
+    }
+
+    fun unlockEncryptedArchive(passphrase: String) {
+        val file = _pendingEncryptedArchiveFile.value ?: return
+        viewModelScope.launch {
+            val activeCompanyId = preferences.value.activeCompanyId
+            val res = withContext(Dispatchers.IO) {
+                encryptedBackupManager.inspectEncryptedArchive(file, passphrase, activeCompanyId)
+            }
+            res.fold(
+                onSuccess = { preview ->
+                    pendingArchivePassphrase = passphrase
+                    _archiveImportPreview.value = preview
+                },
+                onFailure = { err ->
+                    notifyMessage("Cannot open encrypted backup: ${err.message}")
+                }
+            )
+        }
+    }
+
+    fun dismissEncryptedImport() {
+        _pendingEncryptedArchiveFile.value?.let { runCatching { it.delete() } }
+        _pendingEncryptedArchiveFile.value = null
+        _archiveImportPreview.value = null
+        pendingArchivePassphrase = ""
+    }
+
+    fun applyEncryptedArchiveRestore(
+        replaceConflicts: Boolean,
+        restorePreferences: Boolean,
+        allowCrossCompany: Boolean
+    ) {
+        val file = _pendingEncryptedArchiveFile.value ?: return
+        val pass = pendingArchivePassphrase
+        viewModelScope.launch {
+            val activeCompanyId = preferences.value.activeCompanyId
+            val res = withContext(Dispatchers.IO) {
+                encryptedBackupManager.restoreEncryptedArchive(
+                    archiveFile = file,
+                    passphrase = pass,
+                    targetFilesDir = appContext.filesDir,
+                    replaceConflicts = replaceConflicts,
+                    restorePreferences = restorePreferences,
+                    activeCompanyId = activeCompanyId,
+                    allowCrossCompanyRestore = allowCrossCompany
+                )
+            }
+            dismissEncryptedImport()
+            res.fold(
+                onSuccess = { r ->
+                    rebuildReminders()
+                    CloudSyncManager.scheduleBackgroundSync(appContext)
+                    notifyMessage(
+                        "Restored ${r.storesWritten} stores, ${r.jobsWritten} jobs, ${r.invoicesWritten} invoices, and ${r.attachmentsRestored} files."
+                    )
+                },
+                onFailure = { err -> notifyMessage("Restore failed: ${err.message}") }
             )
         }
     }

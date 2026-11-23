@@ -54,6 +54,8 @@ import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.launchDialer
 import com.delifar.app.ui.components.launchDirections
 import com.delifar.app.ui.components.todayHoursSummary
+import com.delifar.app.ui.theme.AmberAccent
+import com.delifar.app.ui.theme.AmberContainer
 import java.time.ZoneId
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -184,6 +186,14 @@ fun StoresScreen(
                                             overflow = TextOverflow.Ellipsis
                                         )
                                     }
+                                    if (!swh.store.locationConfirmed) {
+                                        Spacer(Modifier.width(6.dp))
+                                        StatusTag(
+                                            text = "Review Pin",
+                                            bg = AmberContainer,
+                                            fg = AmberAccent
+                                        )
+                                    }
                                     if (activeCount > 0) {
                                         Spacer(Modifier.width(8.dp))
                                         StatusTag(
@@ -230,19 +240,24 @@ fun StoresScreen(
                                         }
                                         IconButton(
                                             onClick = {
-                                                launchDirections(
-                                                    context,
-                                                    swh.store.lat,
-                                                    swh.store.lon,
-                                                    swh.store.name,
-                                                    swh.store.address
-                                                )
+                                                if (!swh.store.locationConfirmed) {
+                                                    onOpenStore(swh.store.id)
+                                                } else {
+                                                    launchDirections(
+                                                        context,
+                                                        swh.store.lat,
+                                                        swh.store.lon,
+                                                        swh.store.name,
+                                                        swh.store.address
+                                                    )
+                                                }
                                             },
                                             modifier = Modifier.size(36.dp)
                                         ) {
                                             Icon(
                                                 Icons.Default.Directions,
                                                 contentDescription = lStr(R.string.directions),
+                                                tint = if (swh.store.locationConfirmed) MaterialTheme.colorScheme.onSurface else AmberAccent,
                                                 modifier = Modifier.size(18.dp)
                                             )
                                         }

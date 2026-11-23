@@ -7,6 +7,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
+import com.delifar.app.cloud.InvoiceSyncValidator
+import com.delifar.app.cloud.InvoiceUploadErrorCode
+import com.delifar.app.cloud.InvoiceUploadException
 import com.delifar.app.data.DeliFarDatabase
 import com.delifar.app.data.DeliFarRepository
 import com.delifar.app.data.DraftItemInput
@@ -14,16 +17,28 @@ import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.HoursMode
 import com.delifar.app.data.InvoicePageEntity
 import com.delifar.app.data.InvoiceStatus
+import com.delifar.app.data.InvoiceWithPages
 import com.delifar.app.data.JobType
 import com.delifar.app.data.PrefKeys
 import com.delifar.app.data.SearchArea
 import com.delifar.app.data.StoreHoursEntity
 import com.delifar.app.domain.BackupManager
+import com.delifar.app.domain.EncryptedArchiveBackupManager
 import com.delifar.app.network.AddressGeocoderService
+import com.delifar.app.network.GeoValidation
 import com.delifar.app.network.GeocodeSource
 import com.delifar.app.reminders.ReminderScheduler
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertNull
+import java.io.ByteArrayOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -444,11 +459,18 @@ class DeliFarDatabaseAndWorkflowTests {
                             db.execSQL("CREATE TABLE receipts (receiptKey TEXT NOT NULL PRIMARY KEY, deliveredAt INTEGER NOT NULL)")
                             db.execSQL("CREATE TABLE search_cache (cacheKey TEXT NOT NULL PRIMARY KEY, responseJson TEXT NOT NULL, cachedAt INTEGER NOT NULL)")
 
-                            // Seed legacy v5 store, hours, and invoice
+                            // Seed legacy v5 stores (one real Glendale store, one suspect silent downtown-LA default), hours, and invoice
                             db.execSQL("""
                                 INSERT INTO stores VALUES (
                                     'legacy_s1', 'Legacy Market', '500 N Central Ave, Glendale, CA',
                                     34.1520, -118.2580, 'shared_osm_id', '818-555-0111',
+                                    1700000000000, 1700000000000, 0, 'compA', 'synced', NULL, 'ownerA', 1
+                                )
+                            """.trimIndent())
+                            db.execSQL("""
+                                INSERT INTO stores VALUES (
+                                    'legacy_suspect_la', 'Unverified Legacy Store', '1234 Oak St, Burbank, CA',
+                                    34.0522, -118.2437, NULL, '',
                                     1700000000000, 1700000000000, 0, 'compA', 'synced', NULL, 'ownerA', 1
                                 )
                             """.trimIndent())
@@ -469,20 +491,30 @@ class DeliFarDatabaseAndWorkflowTests {
             )
             helper.writableDatabase.close()
 
-            // Open via Room v6 with MIGRATION_5_6
+            // Open via Room v7 with MIGRATION_5_6 and MIGRATION_6_7
             val migratedDb = Room.databaseBuilder(context, DeliFarDatabase::class.java, dbName)
-                .addMigrations(DeliFarDatabase.MIGRATION_5_6)
+                .addMigrations(DeliFarDatabase.MIGRATION_5_6, DeliFarDatabase.MIGRATION_6_7)
                 .allowMainThreadQueries()
                 .build()
             val migratedRepo = DeliFarRepository(migratedDb)
 
-            // Existing v5 store & hours survive intact with default locationConfirmed=true & geocodeSource='legacy'
+            // Existing v5 store with real Glendale coords stays locationConfirmed=true
             val legacyStore = migratedDb.storeDao().getStoreWithHours("legacy_s1")
             assertNotNull(legacyStore)
             assertEquals("Legacy Market", legacyStore!!.store.name)
             assertTrue(legacyStore.store.locationConfirmed)
             assertEquals("legacy", legacyStore.store.geocodeSource)
             assertEquals(1, legacyStore.hours.size)
+
+            // Existing v5 store with suspect downtown-LA fallback (34.0522, -118.2437) is PRESERVED (not deleted/moved)
+            // and flagged locationConfirmed=false so the user is prompted to review & confirm its pin
+            val suspectStore = migratedDb.storeDao().getStoreWithHours("legacy_suspect_la")
+            assertNotNull(suspectStore)
+            assertEquals("Unverified Legacy Store", suspectStore!!.store.name)
+            assertEquals(34.0522, suspectStore.store.lat, 0.00001)
+            assertEquals(-118.2437, suspectStore.store.lon, 0.00001)
+            assertFalse(suspectStore.store.locationConfirmed)
+            assertTrue(GeoValidation.isSuspectDefaultLosAngelesCoord(suspectStore.store.lat, suspectStore.store.lon))
 
             // Existing v5 invoice survives with assignedDriverUid=null
             val legacyInv = migratedDb.invoiceDao().getInvoiceWithPages("legacy_inv1")
@@ -750,5 +782,385 @@ class DeliFarDatabaseAndWorkflowTests {
         )
         assertEquals(0, repeatResult.deliveredCount)
         assertEquals(0, repeatResult.failedOrSuppressedCount)
+    }
+
+    @Test
+    fun invoiceSyncValidator_blocksMissingEmptyOversizedCorruptedFilesAndPartialMetadataSync() = runTest {
+        val tempDir = File(context.cacheDir, "inv_sync_test_${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            // 1. Missing file fails explicitly with MISSING_FILE (never silently skipped!)
+            val missingEx = runCatching {
+                InvoiceSyncValidator.validateLocalAttachment(
+                    localPath = File(tempDir, "does_not_exist.jpg").absolutePath,
+                    label = "page 1",
+                    expectedMimeType = "image/jpeg"
+                )
+            }.exceptionOrNull() as? InvoiceUploadException
+            assertNotNull(missingEx)
+            assertEquals(InvoiceUploadErrorCode.MISSING_FILE, missingEx!!.code)
+
+            // 2. Empty file fails with EMPTY_FILE
+            val emptyFile = File(tempDir, "empty.jpg").apply { writeBytes(ByteArray(0)) }
+            val emptyEx = runCatching {
+                InvoiceSyncValidator.validateLocalAttachment(emptyFile.absolutePath, "empty", "image/jpeg")
+            }.exceptionOrNull() as? InvoiceUploadException
+            assertEquals(InvoiceUploadErrorCode.EMPTY_FILE, emptyEx?.code)
+
+            // 3. Wrong magic bytes fails with INVALID_CONTENT_TYPE
+            val fakePdf = File(tempDir, "fake.pdf").apply { writeBytes("NOT A REAL PDF".toByteArray()) }
+            val mimeEx = runCatching {
+                InvoiceSyncValidator.validateLocalAttachment(fakePdf.absolutePath, "fake pdf", "application/pdf")
+            }.exceptionOrNull() as? InvoiceUploadException
+            assertEquals(InvoiceUploadErrorCode.INVALID_CONTENT_TYPE, mimeEx?.code)
+
+            // 4. Oversized file fails with OVERSIZED_FILE
+            val bigJpg = File(tempDir, "big.jpg").apply {
+                writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) + ByteArray(2048))
+            }
+            val sizeEx = runCatching {
+                InvoiceSyncValidator.validateLocalAttachment(bigJpg.absolutePath, "big", "image/jpeg", maxBytes = 1024L)
+            }.exceptionOrNull() as? InvoiceUploadException
+            assertEquals(InvoiceUploadErrorCode.OVERSIZED_FILE, sizeEx?.code)
+
+            // 5. Valid JPEG + SHA-256 mismatch rejected with CHECKSUM_MISMATCH
+            val validJpgBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 1, 2, 3, 4)
+            val validJpg = File(tempDir, "orig.jpg").apply { writeBytes(validJpgBytes) }
+            val shaEx = runCatching {
+                InvoiceSyncValidator.validateLocalAttachment(
+                    validJpg.absolutePath, "orig", "image/jpeg", expectedSha256 = "000000000000"
+                )
+            }.exceptionOrNull() as? InvoiceUploadException
+            assertEquals(InvoiceUploadErrorCode.CHECKSUM_MISMATCH, shaEx?.code)
+
+            // 6. Valid JPEG, PNG, and PDF pass with matching SHA-256
+            val expectedJpgSha = InvoiceSyncValidator.sha256Bytes(validJpgBytes)
+            val validatedJpg = InvoiceSyncValidator.validateLocalAttachment(
+                validJpg.absolutePath, "orig", "image/jpeg", expectedSha256 = expectedJpgSha
+            )
+            assertEquals(expectedJpgSha, validatedJpg.sha256)
+            assertEquals("image/jpeg", validatedJpg.contentType)
+
+            val validPngBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2)
+            val validPng = File(tempDir, "sig.png").apply { writeBytes(validPngBytes) }
+            assertEquals("image/png", InvoiceSyncValidator.validateLocalAttachment(validPng.absolutePath, "sig", "image/png").contentType)
+
+            val validPdfBytes = "%PDF-1.4\n%%EOF\n".toByteArray(Charsets.US_ASCII)
+            val validPdf = File(tempDir, "signed.pdf").apply { writeBytes(validPdfBytes) }
+            assertEquals("application/pdf", InvoiceSyncValidator.validateLocalAttachment(validPdf.absolutePath, "pdf", "application/pdf").contentType)
+
+            // 7. Partially uploaded invoice MUST be blocked from transitioning to SYNCHRONIZED
+            val comp = repo.registerCompany("Sync Co", "u1", "Owner", "o@example.com", "America/Los_Angeles", SearchArea.LA).getOrThrow()
+            val store = repo.saveStore(
+                null, "Sync Store", "100 Main St, Glendale, CA", 34.1425, -118.2551,
+                null, "", emptyList(), comp.id, "u1", "Owner", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+            ).getOrThrow()
+            val created = repo.createInvoice(
+                companyId = comp.id, jobId = null, storeId = store.id, storeName = store.name,
+                invoiceNumber = "INV-SYNC-1", notes = "",
+                pages = listOf(
+                    InvoicePageEntity(
+                        id = "pg1", invoiceId = "inv_sync_1", pageIndex = 0,
+                        originalLocalPath = validJpg.absolutePath, editedLocalPath = validJpg.absolutePath,
+                        originalSha256 = expectedJpgSha, editedSha256 = expectedJpgSha, byteSize = validJpg.length()
+                    )
+                ),
+                actorUid = "u1", actorName = "Owner", actorRole = EmployeeRole.OWNER
+            ).getOrThrow()
+            val signedInv = repo.signInvoice(
+                invoiceId = created.invoice.id, recipientName = "Sam Receiver", recipientTitle = "Lead",
+                acknowledgmentConfirmed = true, signatureLocalPath = validPng.absolutePath,
+                signaturePageIndex = 0, signaturePosX = 0.5f, signaturePosY = 0.8f,
+                signedPdfLocalPath = validPdf.absolutePath, signedPdfSha256 = InvoiceSyncValidator.sha256Bytes(validPdfBytes),
+                signedPdfBytes = validPdf.length(), actorUid = "u1", actorName = "Owner", actorRole = EmployeeRole.OWNER,
+                companyId = comp.id
+            ).getOrThrow()
+
+            val incompleteIwp = InvoiceWithPages(signedInv, created.pages)
+            val incompleteEx = runCatching {
+                InvoiceSyncValidator.assertInvoiceReadyForMetadataSync(incompleteIwp)
+            }.exceptionOrNull() as? InvoiceUploadException
+            assertEquals(InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS, incompleteEx?.code)
+
+            // Once every remote path is confirmed, readiness check passes
+            val completeIwp = InvoiceWithPages(
+                signedInv.copy(
+                    signatureStoragePath = "companies/${comp.id}/invoices/${signedInv.id}/signature.png",
+                    signedPdfStoragePath = "companies/${comp.id}/invoices/${signedInv.id}/signed_v1.pdf"
+                ),
+                created.pages.map {
+                    it.copy(
+                        originalStoragePath = "companies/${comp.id}/invoices/${signedInv.id}/orig_pg1.jpg",
+                        editedStoragePath = "companies/${comp.id}/invoices/${signedInv.id}/edit_pg1.jpg"
+                    )
+                }
+            )
+            InvoiceSyncValidator.assertInvoiceReadyForMetadataSync(completeIwp)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun encryptedBackupArchive_roundTripCleanDeviceConflictsCrossCompanyCorruptionAndRollback() = runTest {
+        val workDir = File(context.cacheDir, "backup_v2_test_${UUID.randomUUID()}").apply { mkdirs() }
+        val cleanDb = Room.inMemoryDatabaseBuilder(context, DeliFarDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            // Seed source DB with full company, store + hours, job + items, signed invoice + binary attachments
+            val comp = repo.registerCompany(
+                "Ararat Foods Co", "owner_uid_secret", "Armen", "armen.secret@example.com", "America/Los_Angeles", SearchArea.LA
+            ).getOrThrow()
+            val store = repo.saveStore(
+                null, "Brand Market", "1100 S Brand Blvd, Glendale, CA", 34.1329, -118.2551,
+                "osm:n:555", "818-555-0101",
+                listOf(StoreHoursEntity("", 1, HoursMode.OPEN, "07:00-16:00")),
+                comp.id, "owner_uid_secret", "Armen", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+            ).getOrThrow()
+            val job = repo.saveJobAtomically(
+                jobId = "job_bak_1", storeId = store.id, type = JobType.DELIVERY,
+                dateIso = "2026-08-01", timeIso = "09:30", reminderEnabled = true,
+                items = listOf(DraftItemInput(id = "itm_1", name = "Lavash", planned = "12", unit = "cs")),
+                assignedDriverUid = "drv_9", assignedDriverName = "Gevorg", notes = "Side door",
+                companyId = comp.id, actorUid = "owner_uid_secret", actorName = "Armen", actorRole = EmployeeRole.OWNER
+            ).getOrThrow()
+
+            val origBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 11, 22, 33, 44)
+            val editBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 55, 66, 77, 88)
+            val sigBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9, 8, 7)
+            val pdfBytes = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n".toByteArray(Charsets.US_ASCII)
+
+            val origFile = File(workDir, "orig.jpg").apply { writeBytes(origBytes) }
+            val editFile = File(workDir, "edit.jpg").apply { writeBytes(editBytes) }
+            val sigFile = File(workDir, "sig.png").apply { writeBytes(sigBytes) }
+            val pdfFile = File(workDir, "signed.pdf").apply { writeBytes(pdfBytes) }
+
+            val createdInv = repo.createInvoice(
+                companyId = comp.id, jobId = job.id, storeId = store.id, storeName = store.name,
+                invoiceNumber = "INV-BAK-77", notes = "Handle cold",
+                pages = listOf(
+                    InvoicePageEntity(
+                        id = "pg_bak_1", invoiceId = "inv_bak_1", pageIndex = 0,
+                        originalLocalPath = origFile.absolutePath, editedLocalPath = editFile.absolutePath,
+                        originalSha256 = InvoiceSyncValidator.sha256Bytes(origBytes),
+                        editedSha256 = InvoiceSyncValidator.sha256Bytes(editBytes),
+                        byteSize = origFile.length() + editFile.length()
+                    )
+                ),
+                actorUid = "owner_uid_secret", actorName = "Armen", actorRole = EmployeeRole.OWNER
+            ).getOrThrow()
+            repo.signInvoice(
+                invoiceId = createdInv.invoice.id, recipientName = "Sona Receiver", recipientTitle = "Manager",
+                acknowledgmentConfirmed = true, signatureLocalPath = sigFile.absolutePath,
+                signaturePageIndex = 0, signaturePosX = 0.5f, signaturePosY = 0.8f,
+                signedPdfLocalPath = pdfFile.absolutePath, signedPdfSha256 = InvoiceSyncValidator.sha256Bytes(pdfBytes),
+                signedPdfBytes = pdfFile.length(), actorUid = "owner_uid_secret", actorName = "Armen",
+                actorRole = EmployeeRole.OWNER, companyId = comp.id
+            ).getOrThrow()
+
+            val archiveFile = File(workDir, "delifar-full.delifarbak")
+            val sourceMgr = EncryptedArchiveBackupManager(db)
+            val exportSummary = sourceMgr.exportEncryptedArchive(comp.id, "StrongPass123!", archiveFile).getOrThrow()
+            assertEquals(1, exportSummary.storeCount)
+            assertEquals(1, exportSummary.jobCount)
+            assertEquals(1, exportSummary.invoiceCount)
+            assertEquals(4, exportSummary.attachmentCount) // orig, edit, sig, pdf
+            assertTrue(EncryptedArchiveBackupManager.isEncryptedArchive(archiveFile))
+            // Raw encrypted archive MUST NOT leak plaintext credentials or store names
+            val rawText = String(archiveFile.readBytes(), Charsets.ISO_8859_1)
+            assertFalse(rawText.contains("Brand Market"))
+            assertFalse(rawText.contains("armen.secret@example.com"))
+
+            // 1. Wrong passphrase rejected
+            val cleanMgr = EncryptedArchiveBackupManager(cleanDb)
+            assertTrue(cleanMgr.inspectEncryptedArchive(archiveFile, "WrongPass999!").isFailure)
+
+            // 2. Corrupted ciphertext rejected
+            val corruptFile = File(workDir, "corrupt.delifarbak").apply {
+                val b = archiveFile.readBytes()
+                b[b.size - 1] = (b[b.size - 1].toInt() xor 0xFF).toByte()
+                writeBytes(b)
+            }
+            assertTrue(cleanMgr.inspectEncryptedArchive(corruptFile, "StrongPass123!").isFailure)
+
+            // 3. ZipSlip path traversal archive rejected
+            val zipSlipFile = File(workDir, "zipslip.delifarbak")
+            val maliciousZip = ByteArrayOutputStream().apply {
+                ZipOutputStream(this).use { zos ->
+                    zos.putNextEntry(ZipEntry("../../etc/passwd"))
+                    zos.write("evil".toByteArray())
+                    zos.closeEntry()
+                }
+            }.toByteArray()
+            zipSlipFile.writeBytes(encryptTestArchive(maliciousZip, "StrongPass123!"))
+            assertTrue(cleanMgr.inspectEncryptedArchive(zipSlipFile, "StrongPass123!").isFailure)
+
+            // 4. Interrupted restore rolls back both Room AND staged files
+            val restoreDir = File(workDir, "clean_device_files").apply { mkdirs() }
+            val interrupted = cleanMgr.restoreEncryptedArchive(
+                archiveFile = archiveFile,
+                passphrase = "StrongPass123!",
+                targetFilesDir = restoreDir,
+                replaceConflicts = false,
+                restorePreferences = true,
+                activeCompanyId = "",
+                beforeCommitHook = { throw RuntimeException("Simulated process interruption") }
+            )
+            assertTrue(interrupted.isFailure)
+            assertTrue(cleanDb.storeDao().getAllStoresWithHours().isEmpty())
+            assertTrue(cleanDb.invoiceDao().getAllInvoicesWithPages().isEmpty())
+
+            // 5. Clean-device restore succeeds with exact binary attachments & ZERO auth secrets leaked
+            val previewClean = cleanMgr.inspectEncryptedArchive(archiveFile, "StrongPass123!", activeCompanyId = "").getOrThrow()
+            assertTrue(previewClean.isCleanDeviceRestore)
+            assertEquals(1, previewClean.newInvoices)
+            assertEquals(4, previewClean.attachmentCount)
+
+            val restored = cleanMgr.restoreEncryptedArchive(
+                archiveFile = archiveFile,
+                passphrase = "StrongPass123!",
+                targetFilesDir = restoreDir,
+                replaceConflicts = false,
+                restorePreferences = true,
+                activeCompanyId = ""
+            ).getOrThrow()
+            assertTrue(restored.companyRestored)
+            assertEquals(1, restored.storesWritten)
+            assertEquals(1, restored.jobsWritten)
+            assertEquals(1, restored.invoicesWritten)
+            assertEquals(4, restored.attachmentsRestored)
+
+            val restoredInv = cleanDb.invoiceDao().getInvoiceWithPages(createdInv.invoice.id)
+            assertNotNull(restoredInv)
+            assertEquals("INV-BAK-77", restoredInv!!.invoice.invoiceNumber)
+            assertTrue(restoredInv.invoice.signed)
+            assertEquals("Sona Receiver", restoredInv.invoice.recipientName)
+            assertTrue(File(restoredInv.invoice.signatureLocalPath!!).readBytes().contentEquals(sigBytes))
+            assertTrue(File(restoredInv.invoice.signedPdfLocalPath!!).readBytes().contentEquals(pdfBytes))
+            assertTrue(File(restoredInv.sortedPages[0].originalLocalPath).readBytes().contentEquals(origBytes))
+            assertTrue(File(restoredInv.sortedPages[0].editedLocalPath).readBytes().contentEquals(editBytes))
+            // Auth email/UID credentials were NEVER exported or imported
+            val restoredPrefs = cleanDb.preferenceDao().getAll().associate { it.key to it.value }
+            assertNull(restoredPrefs[PrefKeys.ACTIVE_USER_EMAIL])
+            assertNull(restoredPrefs[PrefKeys.ACTIVE_USER_UID])
+
+            // 6. Cross-company restore blocked unless explicitly allowed
+            val crossBlocked = cleanMgr.restoreEncryptedArchive(
+                archiveFile = archiveFile,
+                passphrase = "StrongPass123!",
+                targetFilesDir = restoreDir,
+                replaceConflicts = false,
+                restorePreferences = false,
+                activeCompanyId = "different_company_id",
+                allowCrossCompanyRestore = false
+            )
+            assertTrue(crossBlocked.isFailure)
+            assertTrue(crossBlocked.exceptionOrNull() is SecurityException)
+
+            // 7. Existing-record conflict handling: retain when replaceConflicts=false, update when true, never delete extra local stores
+            val cleanRepo = DeliFarRepository(cleanDb)
+            cleanRepo.saveStore(
+                store.id, "Local Edited Name", store.address, store.lat, store.lon,
+                store.providerId, store.phone, emptyList(), comp.id, "u", "User", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+            ).getOrThrow()
+            val extraLocalStore = cleanRepo.saveStore(
+                null, "Extra Local Store", "999 Extra Ave, Glendale, CA", 34.1555, -118.2500,
+                null, "", emptyList(), comp.id, "u", "User", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+            ).getOrThrow()
+
+            cleanMgr.restoreEncryptedArchive(
+                archiveFile, "StrongPass123!", restoreDir, replaceConflicts = false, restorePreferences = false, activeCompanyId = comp.id
+            ).getOrThrow()
+            assertEquals("Local Edited Name", cleanDb.storeDao().getStore(store.id)!!.name)
+            assertNotNull(cleanDb.storeDao().getStore(extraLocalStore.id))
+
+            cleanMgr.restoreEncryptedArchive(
+                archiveFile, "StrongPass123!", restoreDir, replaceConflicts = true, restorePreferences = false, activeCompanyId = comp.id
+            ).getOrThrow()
+            assertEquals("Brand Market", cleanDb.storeDao().getStore(store.id)!!.name)
+            assertNotNull(cleanDb.storeDao().getStore(extraLocalStore.id)) // Never deletes existing records!
+
+            // 8. Legacy v1 JSON backup remains 100% backward-compatible
+            val v1Json = BackupManager(db).exportJson(comp.id)
+            val parsedV1 = BackupManager(cleanDb).parseAndValidate(v1Json).getOrThrow()
+            assertEquals(1, parsedV1.stores.size)
+            assertEquals(1, parsedV1.jobs.size)
+        } finally {
+            cleanDb.close()
+            workDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun localIsolationAndInvitationPolicy_blocksCrossCompanyDetailAccessUnauthorizedDriversAndEmailMismatch() = runTest {
+        val compA = repo.registerCompany("Tenant A", "ownerA", "Alice", "a@example.com", "America/Los_Angeles", SearchArea.LA).getOrThrow()
+        val compB = repo.registerCompany("Tenant B", "ownerB", "Bob", "b@example.com", "America/Los_Angeles", SearchArea.SAC).getOrThrow()
+
+        val storeA = repo.saveStore(
+            null, "Tenant A Store", "100 Main St, Glendale, CA", 34.1425, -118.2551,
+            null, "", emptyList(), compA.id, "ownerA", "Alice", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+        ).getOrThrow()
+        val invA = repo.createInvoice(
+            companyId = compA.id, jobId = null, storeId = storeA.id, storeName = storeA.name,
+            invoiceNumber = "INV-A-1", notes = "",
+            pages = listOf(
+                InvoicePageEntity("pA", "invA", 0, "/tmp/a.jpg", "/tmp/ae.jpg", "s1", "s2", byteSize = 512)
+            ),
+            actorUid = "drvA1", actorName = "Driver A1", actorRole = EmployeeRole.DRIVER
+        ).getOrThrow()
+
+        // Cross-company detail queries return null
+        assertNull(repo.getStoreWithHours(storeA.id, companyId = compB.id))
+        assertNull(repo.getInvoiceWithPages(invA.invoice.id, companyId = compB.id))
+
+        // Cross-company mutations rejected
+        assertTrue(repo.archiveStore(storeA.id, "ownerB", "Bob", EmployeeRole.OWNER, compB.id).exceptionOrNull() is SecurityException)
+        assertTrue(repo.voidInvoice(invA.invoice.id, "Tamper", "ownerB", "Bob", EmployeeRole.OWNER, compB.id).exceptionOrNull() is SecurityException)
+
+        // Driver 2 cannot sign Driver 1's invoice even inside same company
+        val drv2Sign = repo.signInvoice(
+            invoiceId = invA.invoice.id, recipientName = "Customer", recipientTitle = "",
+            acknowledgmentConfirmed = true, signatureLocalPath = "/tmp/s.png",
+            signaturePageIndex = 0, signaturePosX = 0.5f, signaturePosY = 0.8f,
+            signedPdfLocalPath = "/tmp/p.pdf", signedPdfSha256 = "abc", signedPdfBytes = 100,
+            actorUid = "drvA2", actorName = "Other Driver", actorRole = EmployeeRole.DRIVER,
+            companyId = compA.id
+        )
+        assertTrue(drv2Sign.isFailure)
+        assertTrue(drv2Sign.exceptionOrNull() is SecurityException)
+
+        // Invitation redemption strictly requires matching email and blocks reuse
+        val invite = repo.createInvitation(
+            compA.id, compA.name, "driver.invited@example.com", EmployeeRole.DRIVER,
+            "ownerA", "Alice", EmployeeRole.OWNER
+        ).getOrThrow()
+
+        val blankEmailAttempt = repo.redeemInvitationLocally(invite.inviteCode, "u_x", "Impostor", "")
+        assertTrue(blankEmailAttempt.isFailure)
+        assertTrue(blankEmailAttempt.exceptionOrNull() is SecurityException)
+
+        val mismatchEmailAttempt = repo.redeemInvitationLocally(invite.inviteCode, "u_x", "Impostor", "wrong@example.com")
+        assertTrue(mismatchEmailAttempt.isFailure)
+        assertTrue(mismatchEmailAttempt.exceptionOrNull() is SecurityException)
+
+        val matchedAttempt = repo.redeemInvitationLocally(invite.inviteCode, "u_good", "Driver Invited", "DRIVER.INVITED@example.com")
+        assertTrue(matchedAttempt.isSuccess)
+        assertEquals(EmployeeRole.DRIVER, matchedAttempt.getOrThrow().role)
+
+        // Reuse blocked after acceptance
+        val reuseAttempt = repo.redeemInvitationLocally(invite.inviteCode, "u_good2", "Driver Invited", "driver.invited@example.com")
+        assertTrue(reuseAttempt.isFailure)
+    }
+
+    private fun encryptTestArchive(zipBytes: ByteArray, passphrase: String): ByteArray {
+        val salt = ByteArray(16) { it.toByte() }
+        val iv = ByteArray(12) { (it + 1).toByte() }
+        val spec = PBEKeySpec(passphrase.toCharArray(), salt, EncryptedArchiveBackupManager.PBKDF2_ITERATIONS, 256)
+        val key = SecretKeySpec(SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded, "AES")
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, iv))
+        cipher.updateAAD(EncryptedArchiveBackupManager.MAGIC_BYTES)
+        val ct = cipher.doFinal(zipBytes)
+        return EncryptedArchiveBackupManager.MAGIC_BYTES + salt + iv + ct
     }
 }

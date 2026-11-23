@@ -61,16 +61,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import com.delifar.app.R
+import com.delifar.app.cloud.FirebaseServices
 import com.delifar.app.data.AppPreferences
 import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.PrefKeys
 import com.delifar.app.data.SearchArea
 import com.delifar.app.domain.BusinessRules
+import com.delifar.app.domain.EncryptedArchiveBackupManager
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.RoleBadge
 import com.delifar.app.ui.components.lStr
+import com.delifar.app.ui.theme.AmberAccent
 import com.delifar.app.ui.theme.SuccessGreen
+import com.delifar.app.ui.theme.TerracottaError
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -87,7 +92,12 @@ fun SettingsScreen(
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsState()
     val failedSyncCount by viewModel.failedSyncCount.collectAsState()
     val importPreview by viewModel.importPreview.collectAsState()
+    val pendingEncryptedFile by viewModel.pendingEncryptedArchiveFile.collectAsState()
+    val archiveImportPreview by viewModel.archiveImportPreview.collectAsState()
     val pendingMigration by viewModel.pendingMigration.collectAsState()
+
+    var showExportPassphraseDialog by remember { mutableStateOf(false) }
+    var pendingExportPassphrase by remember { mutableStateOf("") }
 
     var hasNotifPermission by remember {
         mutableStateOf(
@@ -101,6 +111,16 @@ fun SettingsScreen(
     ) { granted ->
         hasNotifPermission = granted
         if (granted) viewModel.rebuildReminders()
+    }
+
+    val exportEncryptedLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        val pass = pendingExportPassphrase
+        pendingExportPassphrase = ""
+        if (uri != null && pass.length >= EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH) {
+            viewModel.exportEncryptedArchiveToUri(uri, pass)
+        }
     }
 
     val exportLauncher = rememberLauncherForActivityResult(
@@ -176,6 +196,13 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    FirebaseServices.lastInitError?.let { initErr ->
+                        Text(
+                            text = initErr,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AmberAccent
+                        )
+                    }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
@@ -426,30 +453,36 @@ fun SettingsScreen(
                 }
             }
 
-            // Backup & Import
+            // Backup & Import (Encrypted v2 Archive + Legacy v1 JSON)
             item {
                 SettingsCard(title = lStr(R.string.settings_backup)) {
                     Text(
-                        text = lStr(R.string.backup_warning),
+                        text = "Full Encrypted Backup (.delifarbak) uses AES-256-GCM to protect company settings, stores, jobs, invoice scans, signatures, and signed PDFs. Auth credentials and signing keys are never exported.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Button(
+                        onClick = { showExportPassphraseDialog = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Upload, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Export Encrypted Backup (.delifarbak)")
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { exportLauncher.launch("delifar-backup-${BusinessRules.todayIso(zoneId)}.json") },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Default.Upload, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text(lStr(R.string.export_json))
-                        }
                         OutlinedButton(
-                            onClick = { importLauncher.launch(arrayOf("application/json", "*/*")) },
+                            onClick = { importLauncher.launch(arrayOf("*/*")) },
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.Download, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text(lStr(R.string.import_json))
+                            Text("Import Backup")
+                        }
+                        OutlinedButton(
+                            onClick = { exportLauncher.launch("delifar-backup-${BusinessRules.todayIso(zoneId)}.json") },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Legacy JSON (v1)")
                         }
                     }
                 }
@@ -459,7 +492,8 @@ fun SettingsScreen(
             item {
                 SettingsCard(title = lStr(R.string.settings_mapping_services)) {
                     Text(
-                        text = lStr(R.string.settings_mapping_policy_note),
+                        text = "Personal / Device Mode: Android Geocoder + manual map pin works out of the box with no API key.\n" +
+                            "Commercial Fleet Mode: Do not rely on the public Nominatim demo server for commercial fleet volume — configure your own self-hosted or commercial HTTPS geocoding & OSRM routing endpoints below.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -659,6 +693,188 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { viewModel.dismissImportPreview() }) {
+                    Text(lStr(R.string.cancel))
+                }
+            }
+        )
+    }
+
+    // Encrypted Backup Export Passphrase Dialog
+    if (showExportPassphraseDialog) {
+        var pass1 by remember { mutableStateOf("") }
+        var pass2 by remember { mutableStateOf("") }
+        var passErr by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { showExportPassphraseDialog = false },
+            title = { Text("Encrypt Full Backup") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Choose a passphrase (at least ${EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH} characters). You will need this exact passphrase to restore the backup.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = pass1,
+                        onValueChange = { pass1 = it; passErr = null },
+                        label = { Text("Passphrase") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = pass2,
+                        onValueChange = { pass2 = it; passErr = null },
+                        label = { Text("Confirm Passphrase") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    passErr?.let { err ->
+                        Text(err, color = TerracottaError, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        when {
+                            pass1.length < EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH ->
+                                passErr = "Passphrase must be at least ${EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH} characters."
+                            pass1 != pass2 ->
+                                passErr = "Passphrases do not match."
+                            else -> {
+                                pendingExportPassphrase = pass1
+                                showExportPassphraseDialog = false
+                                exportEncryptedLauncher.launch("delifar-full-backup-${BusinessRules.todayIso(zoneId)}.delifarbak")
+                            }
+                        }
+                    }
+                ) {
+                    Text("Continue")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExportPassphraseDialog = false }) {
+                    Text(lStr(R.string.cancel))
+                }
+            }
+        )
+    }
+
+    // Encrypted Backup Unlock Dialog
+    if (pendingEncryptedFile != null && archiveImportPreview == null) {
+        var unlockPass by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissEncryptedImport() },
+            title = { Text("Unlock Encrypted Backup") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Enter the passphrase used when this .delifarbak archive was created.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = unlockPass,
+                        onValueChange = { unlockPass = it },
+                        label = { Text("Passphrase") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = unlockPass.length >= EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH,
+                    onClick = { viewModel.unlockEncryptedArchive(unlockPass) }
+                ) {
+                    Text("Verify & Inspect")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissEncryptedImport() }) {
+                    Text(lStr(R.string.cancel))
+                }
+            }
+        )
+    }
+
+    // Verified Encrypted Archive Restore Preview Dialog
+    archiveImportPreview?.let { preview ->
+        var replaceConflicts by remember { mutableStateOf(false) }
+        var restorePrefs by remember { mutableStateOf(false) }
+        var confirmCrossCompany by remember { mutableStateOf(false) }
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissEncryptedImport() },
+            title = { Text("Restore Encrypted Backup") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Company: ${preview.backupCompanyName} (schema v${preview.dbSchemaVersion})",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Text(
+                        "Stores: ${preview.newStores} new, ${preview.identicalStores} identical, ${preview.conflictingStores} conflicting",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "Jobs: ${preview.newJobs} new, ${preview.identicalJobs} identical, ${preview.conflictingJobs} conflicting",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "Invoices: ${preview.newInvoices} new, ${preview.identicalInvoices} identical, ${preview.conflictingInvoices} conflicting • ${preview.attachmentCount} verified files",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (preview.isCrossCompany) {
+                        Text(
+                            "Warning: This backup belongs to a different company (${preview.backupCompanyName}). Cross-company merge is blocked unless explicitly confirmed.",
+                            color = TerracottaError,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = confirmCrossCompany,
+                                onCheckedChange = { confirmCrossCompany = it }
+                            )
+                            Text("Allow merging into active company", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    if (preview.conflictingStores > 0 || preview.conflictingJobs > 0 || preview.conflictingInvoices > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = replaceConflicts,
+                                onCheckedChange = { replaceConflicts = it }
+                            )
+                            Text(lStr(R.string.import_replace_conflicts), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    if (preview.preferenceCount > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = restorePrefs,
+                                onCheckedChange = { restorePrefs = it }
+                            )
+                            Text(lStr(R.string.import_restore_prefs), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !preview.isCrossCompany || confirmCrossCompany,
+                    onClick = {
+                        viewModel.applyEncryptedArchiveRestore(
+                            replaceConflicts = replaceConflicts,
+                            restorePreferences = restorePrefs,
+                            allowCrossCompany = confirmCrossCompany
+                        )
+                    }
+                ) {
+                    Text(lStr(R.string.import_apply))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissEncryptedImport() }) {
                     Text(lStr(R.string.cancel))
                 }
             }

@@ -81,8 +81,15 @@ service firebase.storage {
         );
     }
 
-    function validInvoiceContentType() {
-      return request.resource.contentType.matches('image/jpeg|image/png|application/pdf');
+    function isEditablePageFile(fileName) {
+      return fileName.matches('^edit_[A-Za-z0-9_-]{1,120}\\.(jpg|jpeg|png)$');
+    }
+
+    function validInvoiceContentType(fileName) {
+      return (fileName.matches('^signed_v[0-9]{1,6}\\.pdf$') && request.resource.contentType == 'application/pdf')
+        || (fileName == 'signature.png' && request.resource.contentType == 'image/png')
+        || (fileName.matches('^(orig|edit)_[A-Za-z0-9_-]{1,120}\\.png$') && request.resource.contentType == 'image/png')
+        || (fileName.matches('^(orig|edit)_[A-Za-z0-9_-]{1,120}\\.(jpg|jpeg)$') && request.resource.contentType == 'image/jpeg');
     }
 
     function withinSizeLimit() {
@@ -97,21 +104,20 @@ service firebase.storage {
       allow read: if isOwnerManagerOrAccountant(companyId)
         || isDriverInvoiceParticipant(companyId, invoiceId);
 
-      // Write-once uploads restricted by role, invoice ownership, unsigned state, filename pattern, MIME, and size
+      // Write-once uploads for orig_*, signature.png, and signed_v*.pdf (resource == null required);
+      // edit_* pages may be re-uploaded only while the invoice is not yet signed.
       allow create: if canUploadToInvoice(companyId, invoiceId)
         && validInvoiceFileName(fileName)
         && withinSizeLimit()
-        && validInvoiceContentType();
+        && validInvoiceContentType(fileName)
+        && (resource == null || isEditablePageFile(fileName));
 
-      // Signed PDFs, signature PNGs, and untouched original photographs cannot be overwritten;
-      // updates to edited pages are only allowed while the invoice is not yet signed.
+      // Metadata updates or overwrites are strictly prohibited for signed PDFs, signature PNGs, and originals;
+      // allowed only for edit_* pages while the invoice is not yet signed.
       allow update: if canUploadToInvoice(companyId, invoiceId)
-        && validInvoiceFileName(fileName)
-        && !fileName.matches('^signed_.*\\.pdf$')
-        && !fileName.matches('^orig_.*')
-        && fileName != 'signature.png'
+        && isEditablePageFile(fileName)
         && withinSizeLimit()
-        && validInvoiceContentType();
+        && validInvoiceContentType(fileName);
 
       allow delete: if false;
     }

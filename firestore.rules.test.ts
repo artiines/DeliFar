@@ -370,11 +370,78 @@ async function runTests() {
       { contentType: "image/jpeg" }
     )
   );
-  // Driver 1 CAN upload files for a brand-new offline invoice before the Firestore doc is written
+  // Driver 1 CAN upload valid allowlisted files for a brand-new offline invoice before the Firestore doc is written
   await assertSucceeds(
     uploadBytes(
       ref(drv1Storage, "companies/compA/invoices/inv_new_offline/orig_p1.jpg"),
       new Uint8Array([0xff, 0xd8, 0xff]),
+      { contentType: "image/jpeg" }
+    )
+  );
+  await assertSucceeds(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/signature.png"),
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      { contentType: "image/png" }
+    )
+  );
+  await assertSucceeds(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/signed_v1.pdf"),
+      new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+      { contentType: "application/pdf" }
+    )
+  );
+  // Strict filename allowlist rejects arbitrary/unexpected filenames even on new invoices
+  await assertFails(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/random_file.jpg"),
+      new Uint8Array([0xff, 0xd8, 0xff]),
+      { contentType: "image/jpeg" }
+    )
+  );
+  // Immutable files (orig_*, signature.png, signed_v*.pdf) CANNOT be overwritten once uploaded
+  await assertFails(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/signed_v1.pdf"),
+      new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]),
+      { contentType: "application/pdf" }
+    )
+  );
+  await assertFails(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/signature.png"),
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d]),
+      { contentType: "image/png" }
+    )
+  );
+  await assertFails(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/orig_p1.jpg"),
+      new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
+      { contentType: "image/jpeg" }
+    )
+  );
+  // Mismatched content-type vs filename extension is rejected
+  await assertFails(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/signed_v2.pdf"),
+      new Uint8Array([0xff, 0xd8, 0xff]),
+      { contentType: "image/jpeg" }
+    )
+  );
+  // Editable page (edit_*) CAN be created and re-uploaded while the invoice is not yet signed
+  await assertSucceeds(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/edit_p1.jpg"),
+      new Uint8Array([0xff, 0xd8, 0xff]),
+      { contentType: "image/jpeg" }
+    )
+  );
+  await assertSucceeds(
+    uploadBytes(
+      ref(drv1Storage, "companies/compA/invoices/inv_new_offline/edit_p1.jpg"),
+      new Uint8Array([0xff, 0xd8, 0xff, 0xe1]),
       { contentType: "image/jpeg" }
     )
   );
@@ -388,7 +455,7 @@ async function runTests() {
   );
 
   await testEnv.cleanup();
-  console.log("All DeliFar 2.0 Firestore & Cloud Storage security rule tests passed!");
+  console.log("All DeliFar 2.1 Firestore & Cloud Storage security rule tests passed!");
 }
 
 runTests().catch((err) => {
