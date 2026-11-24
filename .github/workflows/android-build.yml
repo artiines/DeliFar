@@ -195,12 +195,8 @@ jobs:
           script: |
             adb logcat -c
             ./gradlew :app:connectedDebugAndroidTest --stacktrace
-            if adb logcat -d | grep -E "FATAL EXCEPTION|Crashlytics build ID is missing" >/dev/null 2>&1; then
-              echo "::error::Fatal runtime exception detected in emulator logcat!"
-              adb logcat -d -s AndroidRuntime:E DeliFarFirebase:W
-              exit 1
-            fi
-            echo "Emulator startup smoke test passed with zero FATAL EXCEPTIONs."
+            adb logcat -d > /tmp/delifar-emulator-logcat.txt
+            if grep -Eq 'FATAL EXCEPTION|Crashlytics build ID is missing' /tmp/delifar-emulator-logcat.txt; then echo "Fatal runtime exception detected"; grep -E -A 25 'FATAL EXCEPTION|Crashlytics build ID is missing' /tmp/delifar-emulator-logcat.txt; exit 1; else echo "Emulator smoke test passed with no matching fatal exceptions"; fi
 
       - name: Clean up decoded secrets
         if: always()
