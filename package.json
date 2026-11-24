@@ -1,0 +1,12 @@
+{
+  "name": "delifar-applet",
+  "version": "2.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node apk-download-server.mjs",
+    "start": "node apk-download-server.mjs",
+    "build": "echo \"Android APK build uses ./gradlew :app:assembleDebug\"",
+    "lint": "node --check apk-download-server.mjs"
+  }
+}

@@ -7,6 +7,9 @@ const PORT = Number(process.env.DEFAULT_APP_PORT || 3000);
 const APK_PATH = path.resolve(process.cwd(), 'output', 'DeliFar.apk');
 const FALLBACK_APK_PATH = path.resolve(process.cwd(), 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
 
+let cachedMetaKey = '';
+let cachedMeta = null;
+
 function resolveApk() {
   if (fs.existsSync(APK_PATH)) return APK_PATH;
   if (fs.existsSync(FALLBACK_APK_PATH)) return FALLBACK_APK_PATH;
@@ -15,17 +18,36 @@ function resolveApk() {
 
 function getApkMeta(filePath) {
   const stat = fs.statSync(filePath);
-  const hash = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
-  return {
+  const key = `${filePath}:${stat.size}:${stat.mtimeMs}`;
+  if (cachedMeta && cachedMetaKey === key) return cachedMeta;
+
+  const sha256File = `${filePath}.sha256`;
+  let hash = '';
+  if (fs.existsSync(sha256File)) {
+    const firstToken = fs.readFileSync(sha256File, 'utf8').trim().split(/\s+/)[0] || '';
+    if (/^[a-f0-9]{64}$/i.test(firstToken)) hash = firstToken;
+  }
+  if (!hash) {
+    hash = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  }
+  cachedMetaKey = key;
+  cachedMeta = {
     sizeBytes: stat.size,
     sizeMb: (stat.size / (1024 * 1024)).toFixed(2),
     sha256: hash,
     updatedAt: stat.mtime.toISOString(),
   };
+  return cachedMeta;
 }
 
 const server = http.createServer((req, res) => {
   const urlPath = (req.url || '/').split('?')[0];
+
+  if (urlPath === '/health' || urlPath === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ status: 'ok' }));
+    return;
+  }
 
   if (urlPath === '/DeliFar.apk' || urlPath === '/download' || urlPath === '/download/DeliFar.apk') {
     const apk = resolveApk();
@@ -157,7 +179,7 @@ const server = http.createServer((req, res) => {
       <a class="btn" href="/DeliFar.apk" download="DeliFar.apk">Download DeliFar.apk (${meta.sizeMb} MB)</a>
       <div class="meta">
         <div class="row"><span class="k">Package</span><span class="v">com.delifar.app</span></div>
-        <div class="row"><span class="k">Version</span><span class="v">1.0.0 (code 1)</span></div>
+        <div class="row"><span class="k">Version</span><span class="v">2.1.1 (code 4)</span></div>
         <div class="row"><span class="k">Android Support</span><span class="v">Android 8.0+ (API 26–36)</span></div>
         <div class="row"><span class="k">File Size</span><span class="v">${meta.sizeMb} MB (${meta.sizeBytes.toLocaleString()} bytes)</span></div>
         <div>
