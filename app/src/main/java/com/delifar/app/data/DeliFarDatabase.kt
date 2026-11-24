@@ -30,6 +30,14 @@ interface CompanyDao {
 
     @Query("UPDATE companies SET storageUsedBytes = :bytes, modified = :modified WHERE id = :companyId")
     suspend fun updateStorageUsed(companyId: String, bytes: Long, modified: Long)
+
+    @Query("SELECT * FROM companies WHERE ownerUid LIKE :prefix ORDER BY created DESC")
+    suspend fun getCompaniesOwnedByPrefix(prefix: String): List<CompanyEntity>
+
+    @Query(
+        "SELECT DISTINCT c.* FROM companies c LEFT JOIN employees e ON e.companyId = c.id AND e.uid = :uid WHERE c.ownerUid = :uid OR (e.uid = :uid AND e.active = 1) ORDER BY c.created DESC"
+    )
+    suspend fun getCompaniesForUser(uid: String): List<CompanyEntity>
 }
 
 @Dao
@@ -57,6 +65,12 @@ interface EmployeeDao {
 
     @Query("UPDATE employees SET role = :role, lastActiveAt = :now WHERE uid = :uid")
     suspend fun setRole(uid: String, role: String, now: Long)
+
+    @Query("SELECT * FROM employees WHERE uid = :uid AND companyId = :companyId LIMIT 1")
+    suspend fun getByUidInCompany(uid: String, companyId: String): EmployeeEntity?
+
+    @Query("DELETE FROM employees WHERE uid = :uid AND companyId = :companyId")
+    suspend fun deleteByUidInCompany(uid: String, companyId: String)
 }
 
 @Dao
@@ -148,6 +162,9 @@ interface StoreDao {
 
     @Query("UPDATE stores SET syncState = :syncState, serverUpdatedAt = :serverTs WHERE id = :storeId")
     suspend fun markSyncState(storeId: String, syncState: String, serverTs: Long?)
+
+    @Query("UPDATE stores SET updatedByUid = :newUid, syncState = 'pending' WHERE companyId = :companyId AND updatedByUid = :oldUid")
+    suspend fun reassignUpdatedByUid(companyId: String, oldUid: String, newUid: String)
 }
 
 @Dao
@@ -242,6 +259,12 @@ interface JobDao {
 
     @Query("UPDATE jobs SET syncState = :syncState, serverUpdatedAt = :serverTs WHERE id = :jobId")
     suspend fun markSyncState(jobId: String, syncState: String, serverTs: Long?)
+
+    @Query("UPDATE jobs SET updatedByUid = :newUid, syncState = 'pending' WHERE companyId = :companyId AND updatedByUid = :oldUid")
+    suspend fun reassignUpdatedByUid(companyId: String, oldUid: String, newUid: String)
+
+    @Query("UPDATE jobs SET assignedDriverUid = :newUid, assignedDriverName = :newName, syncState = 'pending' WHERE companyId = :companyId AND assignedDriverUid = :oldUid")
+    suspend fun reassignAssignedDriverUid(companyId: String, oldUid: String, newUid: String, newName: String)
 }
 
 @Dao
@@ -315,6 +338,12 @@ interface InvoiceDao {
         signedServerTs: Long?,
         error: String?
     )
+
+    @Query("UPDATE invoices SET createdByUid = :newUid, syncState = 'pending' WHERE companyId = :companyId AND createdByUid = :oldUid")
+    suspend fun reassignCreatedByUid(companyId: String, oldUid: String, newUid: String)
+
+    @Query("UPDATE invoices SET assignedDriverUid = :newUid, syncState = 'pending' WHERE companyId = :companyId AND assignedDriverUid = :oldUid")
+    suspend fun reassignAssignedDriverUid(companyId: String, oldUid: String, newUid: String)
 }
 
 @Dao
@@ -372,6 +401,18 @@ interface SyncQueueDao {
 
     @Query("UPDATE sync_queue SET status = 'pending', nextAttemptAt = 0 WHERE companyId = :companyId AND status = 'failed'")
     suspend fun resetFailedForCompany(companyId: String)
+
+    @Query("UPDATE sync_queue SET status = 'pending', nextAttemptAt = 0 WHERE companyId = :companyId AND entityId = :entityId AND status = 'failed'")
+    suspend fun resetFailedForEntity(companyId: String, entityId: String)
+
+    @Query("SELECT COUNT(*) FROM sync_queue WHERE companyId = :companyId AND status != 'synced'")
+    suspend fun getPendingCountNow(companyId: String): Int
+
+    @Query("SELECT COUNT(*) FROM sync_queue WHERE companyId = :companyId AND status = 'failed'")
+    suspend fun getFailedCountNow(companyId: String): Int
+
+    @Query("SELECT lastError FROM sync_queue WHERE companyId = :companyId AND status = 'failed' AND lastError IS NOT NULL ORDER BY createdAt DESC LIMIT 1")
+    fun observeLatestErrorByCompany(companyId: String): Flow<String?>
 
     @Query("UPDATE sync_queue SET status = 'pending', nextAttemptAt = 0 WHERE status = 'failed'")
     suspend fun resetFailedForRetry()

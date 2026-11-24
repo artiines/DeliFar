@@ -50,11 +50,18 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
 import com.delifar.app.cloud.FirebaseServices
+import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.SearchArea
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.RoleBadge
+import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.lStr
+import com.delifar.app.ui.components.roleLabel
+import com.delifar.app.ui.components.syncStatusColors
+import com.delifar.app.ui.components.syncStatusLabel
+import com.delifar.app.ui.theme.AmberAccent
+import com.delifar.app.ui.theme.AmberContainer
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
 import kotlinx.coroutines.launch
@@ -71,6 +78,11 @@ fun AccountAndCompanyScreen(
     val prefs by viewModel.preferences.collectAsState()
     val company by viewModel.activeCompany.collectAsState()
     val pendingMigration by viewModel.pendingMigration.collectAsState()
+    val offlineCompanies by viewModel.offlineOwnedCompanies.collectAsState()
+    val userCompanies by viewModel.userCompanies.collectAsState()
+    val resolvedSyncStatus by viewModel.resolvedSyncStatus.collectAsState()
+    val pendingSyncCount by viewModel.pendingSyncCount.collectAsState()
+    val failedSyncCount by viewModel.failedSyncCount.collectAsState()
     val scope = rememberCoroutineScope()
 
     var activeTab by remember { mutableStateOf(if (company == null) AuthTab.REGISTER_COMPANY else AuthTab.ACCOUNT) }
@@ -114,12 +126,13 @@ fun AccountAndCompanyScreen(
         ) {
             // Current Session Summary
             item {
+                val (syncBg, syncFg) = syncStatusColors(resolvedSyncStatus)
                 Card(
                     shape = RoundedCornerShape(14.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
                 ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
                                 text = prefs.activeUserName.ifBlank { "Offline Operator" },
@@ -132,24 +145,134 @@ fun AccountAndCompanyScreen(
                         }
                         Text(
                             text = if (company != null) "Company: ${company!!.name} (${company!!.timezone})"
-                            else "No company registered yet",
+                            else "No active company selected",
                             style = MaterialTheme.typography.bodyMedium
                         )
-                        Text(
-                            text = if (FirebaseServices.isConfigured) "Firebase Cloud: Connected"
-                            else "Firebase Cloud: Local Offline Mode (add app/google-services.json to sync live)",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary
+                        StatusTag(
+                            text = syncStatusLabel(resolvedSyncStatus, pendingSyncCount, failedSyncCount),
+                            bg = syncBg,
+                            fg = syncFg
                         )
+                        Text(
+                            text = when {
+                                !FirebaseServices.isConfigured ->
+                                    "Offline Mode: Firebase config (google-services.json) is not bundled in this build. All data is stored safely on this device."
+                                !FirebaseServices.isAuthenticated ->
+                                    "Firebase is configured (${FirebaseServices.appCheckProviderName}), but you are not signed in. Sign in below to sync with the cloud."
+                                else ->
+                                    "Signed in as ${FirebaseServices.currentAuthEmail ?: prefs.activeUserEmail} • App Check: ${FirebaseServices.appCheckProviderName}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (company == null) {
+                            Text(
+                                text = "Working Role (Offline / Setup)",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                EmployeeRole.ALL.forEach { role ->
+                                    FilterChip(
+                                        selected = prefs.activeUserRole == role,
+                                        onClick = { viewModel.selectOfflineRole(role) },
+                                        label = { Text(roleLabel(role)) }
+                                    )
+                                }
+                            }
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (company != null) {
                                 Button(onClick = onOpenTeam) {
                                     Text(lStr(R.string.team_management))
                                 }
                             }
-                            if (prefs.activeUserUid.isNotBlank()) {
+                            if (prefs.activeUserUid.isNotBlank() || FirebaseServices.isAuthenticated) {
                                 OutlinedButton(onClick = { viewModel.signOut() }) {
                                     Text(lStr(R.string.sign_out))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Explicit Offline-to-Cloud Company Ownership Transfer Prompt (never silent)
+            if (FirebaseServices.isAuthenticated && offlineCompanies.isNotEmpty()) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = AmberContainer),
+                        border = BorderStroke(1.dp, AmberAccent.copy(alpha = 0.5f))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = lStr(R.string.claim_offline_company_title),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "You have locally created company data on this device. Confirm below to assign ownership to your signed-in account (${FirebaseServices.currentAuthEmail ?: prefs.activeUserEmail}) without creating duplicate records.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            offlineCompanies.forEach { localComp ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(localComp.name, style = MaterialTheme.typography.titleSmall)
+                                        Text(localComp.timezone, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Button(
+                                        enabled = !busy,
+                                        onClick = {
+                                            busy = true
+                                            errorMsg = null
+                                            scope.launch {
+                                                val res = viewModel.claimLocalCompany(localComp.id)
+                                                busy = false
+                                                res.onFailure { errorMsg = it.message ?: "Could not claim offline company." }
+                                            }
+                                        }
+                                    ) {
+                                        Text(lStr(R.string.claim_offline_company_action))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Company Switcher when user belongs to multiple companies
+            if (userCompanies.size > 1) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(lStr(R.string.switch_company_title), style = MaterialTheme.typography.titleMedium)
+                            userCompanies.forEach { comp ->
+                                val isCurrent = comp.id == company?.id
+                                OutlinedButton(
+                                    onClick = {
+                                        if (!isCurrent) {
+                                            scope.launch { viewModel.switchCompany(comp.id) }
+                                        }
+                                    },
+                                    enabled = !isCurrent,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(if (isCurrent) "${comp.name} (Active)" else comp.name)
                                 }
                             }
                         }

@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.PictureAsPdf
@@ -55,8 +56,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
+import com.delifar.app.cloud.InvoiceSyncValidator
 import com.delifar.app.data.InvoiceStatus
 import com.delifar.app.data.InvoiceWithPages
+import com.delifar.app.data.SyncState
 import com.delifar.app.documents.SignedPdfGenerator
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
@@ -65,6 +68,11 @@ import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.invoiceStatusColors
 import com.delifar.app.ui.components.invoiceStatusLabel
 import com.delifar.app.ui.components.lStr
+import com.delifar.app.ui.theme.InfoBlue
+import com.delifar.app.ui.theme.InfoContainer
+import com.delifar.app.ui.theme.SuccessContainer
+import com.delifar.app.ui.theme.SuccessGreen
+import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
 import kotlinx.coroutines.launch
 
@@ -78,6 +86,7 @@ fun InvoicesScreen(
 ) {
     val context = LocalContext.current
     val prefs by viewModel.preferences.collectAsState()
+    val syncState by viewModel.syncState.collectAsState()
     val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
     val scope = rememberCoroutineScope()
 
@@ -200,14 +209,45 @@ fun InvoicesScreen(
                 } else {
                     items(filtered, key = { it.invoice.id }) { iwp ->
                         val inv = iwp.invoice
-                        val (stBg, stFg) = invoiceStatusColors(inv.status)
+                        val isUploadingNow = syncState.currentlyUploadingInvoiceId == inv.id
+                        val hasAllRemote = remember(iwp) { InvoiceSyncValidator.hasAllRemoteAttachments(iwp) }
+                        val localIssues = remember(iwp) { InvoiceSyncValidator.inspectLocalAttachmentIssues(iwp) }
+                        val (displayStatusText, stBg, stFg) = when {
+                            isUploadingNow -> Triple(lStr(R.string.invoice_status_uploading), InfoContainer, InfoBlue)
+                            inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED ->
+                                Triple(lStr(R.string.invoice_status_upload_failed), TerracottaContainer, TerracottaError)
+                            inv.status == InvoiceStatus.VOIDED ->
+                                Triple(lStr(R.string.invoice_status_voided), invoiceStatusColors(inv.status).first, invoiceStatusColors(inv.status).second)
+                            inv.signed && inv.status == InvoiceStatus.SYNCHRONIZED && inv.syncState == SyncState.SYNCED && hasAllRemote ->
+                                Triple(lStr(R.string.invoice_status_signed_synced), SuccessContainer, SuccessGreen)
+                            inv.status == InvoiceStatus.SYNCHRONIZED && inv.syncState == SyncState.SYNCED && hasAllRemote ->
+                                Triple(lStr(R.string.invoice_status_uploaded), SuccessContainer, SuccessGreen)
+                            inv.companyId.isNotBlank() && (inv.status == InvoiceStatus.PENDING_UPLOAD || inv.syncState == SyncState.PENDING) ->
+                                Triple(lStr(R.string.invoice_status_pending_upload), InfoContainer, InfoBlue)
+                            else ->
+                                Triple(lStr(R.string.invoice_status_saved_locally), invoiceStatusColors(inv.status).first, invoiceStatusColors(inv.status).second)
+                        }
+                        val needsRetry = !isUploadingNow && inv.companyId.isNotBlank() && (
+                            inv.status == InvoiceStatus.UPLOAD_FAILED ||
+                                inv.syncState == SyncState.FAILED ||
+                                inv.status == InvoiceStatus.PENDING_UPLOAD ||
+                                !inv.uploadError.isNullOrBlank()
+                            )
+
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { selectedInvoice = iwp },
                             shape = RoundedCornerShape(14.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                            border = BorderStroke(
+                                1.dp,
+                                if (inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED) {
+                                    TerracottaError.copy(alpha = 0.5f)
+                                } else {
+                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
+                                }
+                            )
                         ) {
                             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Row(
@@ -216,7 +256,7 @@ fun InvoicesScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text("#${inv.invoiceNumber} (v${inv.version})", style = MaterialTheme.typography.titleMedium)
-                                    StatusTag(text = invoiceStatusLabel(inv.status), bg = stBg, fg = stFg)
+                                    StatusTag(text = displayStatusText, bg = stBg, fg = stFg)
                                 }
                                 Text(inv.storeName, style = MaterialTheme.typography.bodyMedium)
                                 Text(
@@ -231,6 +271,25 @@ fun InvoicesScreen(
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.primary
                                     )
+                                }
+                                val failureDetail = inv.uploadError?.takeIf { it.isNotBlank() }
+                                    ?: localIssues.firstOrNull()
+                                if (failureDetail != null && (inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED || localIssues.isNotEmpty())) {
+                                    Text(
+                                        text = failureDetail,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TerracottaError
+                                    )
+                                }
+                                if (needsRetry) {
+                                    OutlinedButton(
+                                        onClick = { viewModel.retryInvoiceUpload(inv.id) },
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(lStr(R.string.retry_upload))
+                                    }
                                 }
                             }
                         }
@@ -266,6 +325,30 @@ fun InvoicesScreen(
                     }
                     inv.voidedReason?.let {
                         Text("Voided reason: $it", color = TerracottaError, style = MaterialTheme.typography.bodySmall)
+                    }
+                    val detailIssues = remember(iwp) { InvoiceSyncValidator.inspectLocalAttachmentIssues(iwp) }
+                    if (!inv.uploadError.isNullOrBlank()) {
+                        Text("Upload error: ${inv.uploadError}", color = TerracottaError, style = MaterialTheme.typography.bodySmall)
+                    }
+                    detailIssues.forEach { issue ->
+                        Text("• $issue", color = TerracottaError, style = MaterialTheme.typography.bodySmall)
+                    }
+
+                    // Safe retry upload (preserves signed state and history)
+                    if (inv.companyId.isNotBlank() &&
+                        (inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED || inv.status == InvoiceStatus.PENDING_UPLOAD)
+                    ) {
+                        Button(
+                            onClick = {
+                                viewModel.retryInvoiceUpload(inv.id)
+                                selectedInvoice = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(lStr(R.string.retry_upload))
+                        }
                     }
 
                     // Document actions

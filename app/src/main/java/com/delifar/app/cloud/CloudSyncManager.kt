@@ -46,13 +46,95 @@ import kotlinx.coroutines.tasks.await
 import java.io.File
 import java.util.concurrent.TimeUnit
 
+enum class CloudSyncStatus {
+    OFFLINE_SAVING_LOCALLY,
+    CONFIGURED_NOT_SIGNED_IN,
+    AUTHENTICATION_REQUIRED,
+    CONNECTING,
+    SYNCHRONIZING,
+    FULLY_SYNCHRONIZED,
+    UPLOAD_PENDING,
+    SYNCHRONIZATION_FAILED,
+    ACCESS_DENIED_OR_UNCONFIGURED
+}
+
+enum class SyncFlushOutcome {
+    NOT_CONFIGURED,
+    NOT_SIGNED_IN,
+    OFFLINE,
+    ACCESS_DENIED_OR_UNCONFIGURED,
+    FAILED_TRANSIENT,
+    SUCCEEDED
+}
+
 data class CloudSyncUiState(
     val firebaseConfigured: Boolean = FirebaseServices.isConfigured,
+    val isAuthenticated: Boolean = FirebaseServices.isAuthenticated,
     val isOnline: Boolean = false,
+    val isConnecting: Boolean = false,
     val isSyncing: Boolean = false,
+    val backendHealth: BackendHealth = if (FirebaseServices.isConfigured) BackendHealth.NOT_SIGNED_IN else BackendHealth.NOT_CONFIGURED,
     val lastSyncedAt: Long? = null,
-    val lastError: String? = null
+    val lastError: String? = null,
+    val currentlyUploadingInvoiceId: String? = null
 )
+
+/**
+ * Pure, deterministic sync status resolver so the UI never displays "Synced" solely because
+ * the local queue is empty or because FirebaseApp.initializeApp returned non-null.
+ */
+object SyncStatusResolver {
+    fun resolve(
+        state: CloudSyncUiState,
+        pendingCount: Int,
+        failedCount: Int,
+        activeCompanyId: String,
+        persistedLastSyncedAt: Long? = null,
+        persistedLastError: String? = null
+    ): CloudSyncStatus {
+        val effectiveLastSyncedAt = state.lastSyncedAt ?: persistedLastSyncedAt
+        val effectiveError = state.lastError ?: persistedLastError
+
+        if (!state.firebaseConfigured) {
+            return CloudSyncStatus.OFFLINE_SAVING_LOCALLY
+        }
+        if (state.isSyncing) {
+            return CloudSyncStatus.SYNCHRONIZING
+        }
+        if (state.isConnecting) {
+            return CloudSyncStatus.CONNECTING
+        }
+        if (state.backendHealth == BackendHealth.ACCESS_DENIED ||
+            state.backendHealth == BackendHealth.BACKEND_NOT_CONFIGURED
+        ) {
+            return CloudSyncStatus.ACCESS_DENIED_OR_UNCONFIGURED
+        }
+        if (!state.isAuthenticated || state.backendHealth == BackendHealth.NOT_SIGNED_IN) {
+            return if (activeCompanyId.isNotBlank() || pendingCount > 0 || failedCount > 0) {
+                CloudSyncStatus.AUTHENTICATION_REQUIRED
+            } else {
+                CloudSyncStatus.CONFIGURED_NOT_SIGNED_IN
+            }
+        }
+        if (failedCount > 0 || !effectiveError.isNullOrBlank()) {
+            return CloudSyncStatus.SYNCHRONIZATION_FAILED
+        }
+        if (pendingCount > 0) {
+            return CloudSyncStatus.UPLOAD_PENDING
+        }
+        if (!state.isOnline || state.backendHealth == BackendHealth.OFFLINE) {
+            return CloudSyncStatus.OFFLINE_SAVING_LOCALLY
+        }
+        if (state.backendHealth == BackendHealth.REACHABLE && effectiveLastSyncedAt != null) {
+            return CloudSyncStatus.FULLY_SYNCHRONIZED
+        }
+        return if (activeCompanyId.isBlank()) {
+            CloudSyncStatus.OFFLINE_SAVING_LOCALLY
+        } else {
+            CloudSyncStatus.CONNECTING
+        }
+    }
+}
 
 /**
  * Coordinates real-time Firestore listeners, conflict-safe merging into Room,
@@ -69,6 +151,7 @@ class CloudSyncManager(
         const val MAX_INVOICE_FILE_BYTES = 15L * 1024L * 1024L
 
         fun scheduleBackgroundSync(context: Context) {
+            if (!FirebaseServices.isConfigured) return
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
@@ -76,11 +159,13 @@ class CloudSyncManager(
                 .setConstraints(constraints)
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(
-                UNIQUE_SYNC_WORK,
-                ExistingWorkPolicy.REPLACE,
-                req
-            )
+            runCatching {
+                WorkManager.getInstance(context).enqueueUniqueWork(
+                    UNIQUE_SYNC_WORK,
+                    ExistingWorkPolicy.REPLACE,
+                    req
+                )
+            }
         }
     }
 
@@ -89,19 +174,125 @@ class CloudSyncManager(
     private var activeCompanyId: String = ""
 
     private val _syncState = MutableStateFlow(
-        CloudSyncUiState(firebaseConfigured = FirebaseServices.isConfigured)
+        CloudSyncUiState(
+            firebaseConfigured = FirebaseServices.isConfigured,
+            isAuthenticated = FirebaseServices.isAuthenticated,
+            backendHealth = if (FirebaseServices.isConfigured) {
+                if (FirebaseServices.isAuthenticated) BackendHealth.OFFLINE else BackendHealth.NOT_SIGNED_IN
+            } else {
+                BackendHealth.NOT_CONFIGURED
+            }
+        )
     )
     val syncState: StateFlow<CloudSyncUiState> = _syncState.asStateFlow()
 
+    fun refreshAuthAndConfigState(persistedLastSyncedAt: Long? = null, persistedLastError: String? = null) {
+        val configured = FirebaseServices.isConfigured
+        val authed = FirebaseServices.isAuthenticated
+        val current = _syncState.value
+        val nextHealth = when {
+            !configured -> BackendHealth.NOT_CONFIGURED
+            !authed -> BackendHealth.NOT_SIGNED_IN
+            current.backendHealth == BackendHealth.NOT_SIGNED_IN || current.backendHealth == BackendHealth.NOT_CONFIGURED ->
+                BackendHealth.OFFLINE
+            else -> current.backendHealth
+        }
+        _syncState.value = current.copy(
+            firebaseConfigured = configured,
+            isAuthenticated = authed,
+            backendHealth = nextHealth,
+            lastSyncedAt = current.lastSyncedAt ?: persistedLastSyncedAt,
+            lastError = current.lastError ?: persistedLastError
+        )
+    }
+
+    private fun recordListenerError(err: Throwable, op: OperationType, path: String) {
+        FirebaseServices.handleFirestoreError(err, op, path)
+        val classified = FirebaseServices.classifyBackendError(err)
+        _syncState.value = _syncState.value.copy(
+            isConnecting = false,
+            isOnline = classified.health == BackendHealth.REACHABLE,
+            isAuthenticated = classified.health != BackendHealth.NOT_SIGNED_IN && FirebaseServices.isAuthenticated,
+            backendHealth = classified.health,
+            lastError = classified.detail
+        )
+        scope.launch {
+            runCatching {
+                if (!classified.detail.isNullOrBlank()) {
+                    repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, classified.detail)
+                }
+            }
+        }
+    }
+
     fun startRealtimeListeners(companyId: String, userUid: String, role: String) {
         stopListeners()
-        if (companyId.isBlank() || !FirebaseServices.isConfigured) return
+        if (!FirebaseServices.isConfigured) {
+            _syncState.value = _syncState.value.copy(
+                firebaseConfigured = false,
+                isAuthenticated = false,
+                isOnline = false,
+                isConnecting = false,
+                backendHealth = BackendHealth.NOT_CONFIGURED
+            )
+            return
+        }
+        if (!FirebaseServices.isAuthenticated) {
+            _syncState.value = _syncState.value.copy(
+                firebaseConfigured = true,
+                isAuthenticated = false,
+                isOnline = false,
+                isConnecting = false,
+                backendHealth = BackendHealth.NOT_SIGNED_IN
+            )
+            return
+        }
+        if (companyId.isBlank()) {
+            _syncState.value = _syncState.value.copy(
+                firebaseConfigured = true,
+                isAuthenticated = true,
+                isConnecting = false
+            )
+            return
+        }
         val fs = FirebaseServices.firestoreOrNull() ?: return
         activeCompanyId = companyId
 
+        _syncState.value = _syncState.value.copy(
+            firebaseConfigured = true,
+            isAuthenticated = true,
+            isConnecting = true,
+            lastError = null
+        )
+
         scope.launch {
-            val online = FirebaseServices.testConnection()
-            _syncState.value = _syncState.value.copy(isOnline = online, firebaseConfigured = true)
+            val check = FirebaseServices.testConnectionDetailed(context, companyId)
+            val reachable = check.health == BackendHealth.REACHABLE
+            val pendingNow = runCatching { db.syncQueueDao().getPendingCountNow(companyId) }.getOrDefault(0)
+            val failedNow = runCatching { db.syncQueueDao().getFailedCountNow(companyId) }.getOrDefault(0)
+            val now = System.currentTimeMillis()
+            val verifiedSynced = reachable && pendingNow == 0 && failedNow == 0
+            if (verifiedSynced) {
+                runCatching {
+                    repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNCED_AT, now.toString())
+                    repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, "")
+                }
+            } else if (!check.detail.isNullOrBlank() &&
+                (check.health == BackendHealth.ACCESS_DENIED || check.health == BackendHealth.BACKEND_NOT_CONFIGURED)
+            ) {
+                runCatching {
+                    repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, check.detail)
+                }
+            }
+            _syncState.value = _syncState.value.copy(
+                firebaseConfigured = true,
+                isAuthenticated = check.health != BackendHealth.NOT_SIGNED_IN && FirebaseServices.isAuthenticated,
+                isConnecting = false,
+                isOnline = reachable,
+                backendHealth = check.health,
+                lastSyncedAt = if (verifiedSynced) now else _syncState.value.lastSyncedAt,
+                lastError = if (reachable) null else check.detail
+            )
         }
 
         val companyRef = fs.collection("companies").document(companyId)
@@ -109,7 +300,7 @@ class CloudSyncManager(
         // 1. Company metadata
         listeners += companyRef.addSnapshotListener { snap, err ->
             if (err != null) {
-                FirebaseServices.handleFirestoreError(err, OperationType.GET, "companies/$companyId")
+                recordListenerError(err, OperationType.GET, "companies/$companyId")
                 return@addSnapshotListener
             }
             if (snap != null && snap.exists()) {
@@ -133,7 +324,7 @@ class CloudSyncManager(
         // 2. Stores
         listeners += companyRef.collection("stores").limit(500).addSnapshotListener { snaps, err ->
             if (err != null) {
-                FirebaseServices.handleFirestoreError(err, OperationType.LIST, "companies/$companyId/stores")
+                recordListenerError(err, OperationType.LIST, "companies/$companyId/stores")
                 return@addSnapshotListener
             }
             if (snaps == null) return@addSnapshotListener
@@ -424,25 +615,127 @@ class CloudSyncManager(
         listeners.forEach { runCatching { it.remove() } }
         listeners.clear()
         activeCompanyId = ""
+        _syncState.value = _syncState.value.copy(
+            isConnecting = false,
+            isAuthenticated = FirebaseServices.isAuthenticated
+        )
     }
 
     /**
      * Flushes queued offline writes & invoice uploads strictly for the active company.
-     * Enforces dependency ordering (company -> employee -> invitation -> store -> job -> invoice_file -> invoice -> audit)
-     * and exponential retry backoff on transient errors.
+     * Returns true ONLY when Firebase is configured, authenticated, reachable, and all due items succeeded.
      */
     suspend fun flushPendingQueue(companyIdOverride: String? = null): Boolean {
-        if (!FirebaseServices.isConfigured) return true
-        val fs = FirebaseServices.firestoreOrNull() ?: return true
+        return flushPendingQueueDetailed(companyIdOverride) == SyncFlushOutcome.SUCCEEDED
+    }
+
+    /**
+     * Detailed queue flush returning an exact [SyncFlushOutcome] so foreground UI and WorkManager
+     * never misreport an unauthenticated, offline, or failed sync as successful.
+     */
+    suspend fun flushPendingQueueDetailed(companyIdOverride: String? = null): SyncFlushOutcome {
+        if (!FirebaseServices.isConfigured) {
+            _syncState.value = _syncState.value.copy(
+                firebaseConfigured = false,
+                isAuthenticated = false,
+                isOnline = false,
+                isSyncing = false,
+                backendHealth = BackendHealth.NOT_CONFIGURED
+            )
+            return SyncFlushOutcome.NOT_CONFIGURED
+        }
+        if (!FirebaseServices.isAuthenticated) {
+            val msg = "Sign in to your Firebase account to synchronize pending changes."
+            _syncState.value = _syncState.value.copy(
+                firebaseConfigured = true,
+                isAuthenticated = false,
+                isOnline = false,
+                isSyncing = false,
+                backendHealth = BackendHealth.NOT_SIGNED_IN,
+                lastError = null
+            )
+            return SyncFlushOutcome.NOT_SIGNED_IN
+        }
+        if (!FirebaseServices.isNetworkAvailable(context)) {
+            _syncState.value = _syncState.value.copy(
+                firebaseConfigured = true,
+                isAuthenticated = true,
+                isOnline = false,
+                isSyncing = false,
+                backendHealth = BackendHealth.OFFLINE,
+                lastError = null
+            )
+            return SyncFlushOutcome.OFFLINE
+        }
+        val fs = FirebaseServices.firestoreOrNull() ?: return SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED
         val storage = FirebaseServices.storageOrNull()
         val targetCompanyId = companyIdOverride?.ifBlank { null }
             ?: activeCompanyId.ifBlank { null }
             ?: repository.getPreferences().activeCompanyId
-        if (targetCompanyId.isBlank()) return true
+        if (targetCompanyId.isBlank()) {
+            _syncState.value = _syncState.value.copy(isSyncing = false)
+            return SyncFlushOutcome.SUCCEEDED
+        }
 
         val now = System.currentTimeMillis()
         val rawDue = db.syncQueueDao().getDueItemsForCompany(targetCompanyId, now)
-        if (rawDue.isEmpty()) return true
+        if (rawDue.isEmpty()) {
+            val failedCount = db.syncQueueDao().getFailedCountNow(targetCompanyId)
+            val pendingCount = db.syncQueueDao().getPendingCountNow(targetCompanyId)
+            if (failedCount > 0) {
+                _syncState.value = _syncState.value.copy(isSyncing = false)
+                return SyncFlushOutcome.FAILED_TRANSIENT
+            }
+            val check = FirebaseServices.testConnectionDetailed(context, targetCompanyId)
+            return when (check.health) {
+                BackendHealth.REACHABLE -> {
+                    val syncedAt = if (pendingCount == 0) System.currentTimeMillis() else _syncState.value.lastSyncedAt
+                    if (syncedAt != null && pendingCount == 0) {
+                        repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNCED_AT, syncedAt.toString())
+                        repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, "")
+                    }
+                    _syncState.value = _syncState.value.copy(
+                        firebaseConfigured = true,
+                        isAuthenticated = true,
+                        isOnline = true,
+                        isSyncing = false,
+                        backendHealth = BackendHealth.REACHABLE,
+                        lastSyncedAt = syncedAt,
+                        lastError = null
+                    )
+                    SyncFlushOutcome.SUCCEEDED
+                }
+                BackendHealth.ACCESS_DENIED, BackendHealth.BACKEND_NOT_CONFIGURED -> {
+                    val detail = check.detail ?: "Access denied or backend not configured."
+                    repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, detail)
+                    _syncState.value = _syncState.value.copy(
+                        isOnline = false,
+                        isSyncing = false,
+                        backendHealth = check.health,
+                        lastError = detail
+                    )
+                    SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED
+                }
+                BackendHealth.NOT_SIGNED_IN -> {
+                    _syncState.value = _syncState.value.copy(
+                        isAuthenticated = false,
+                        isOnline = false,
+                        isSyncing = false,
+                        backendHealth = BackendHealth.NOT_SIGNED_IN
+                    )
+                    SyncFlushOutcome.NOT_SIGNED_IN
+                }
+                else -> {
+                    _syncState.value = _syncState.value.copy(
+                        isOnline = false,
+                        isSyncing = false,
+                        backendHealth = BackendHealth.OFFLINE,
+                        lastError = check.detail
+                    )
+                    SyncFlushOutcome.OFFLINE
+                }
+            }
+        }
 
         val priorityOrder = mapOf(
             "company" to 0,
@@ -459,13 +752,24 @@ class CloudSyncManager(
                 .thenBy { it.createdAt }
         )
 
-        _syncState.value = _syncState.value.copy(isSyncing = true, lastError = null)
+        _syncState.value = _syncState.value.copy(
+            firebaseConfigured = true,
+            isAuthenticated = true,
+            isSyncing = true,
+            lastError = null,
+            currentlyUploadingInvoiceId = null
+        )
         var allSucceeded = true
+        var lastClassifiedHealth = BackendHealth.REACHABLE
+        var lastErrorMsg: String? = null
         val failedInvoiceFileIds = mutableSetOf<String>()
 
         for (item in due) {
             if (item.entityType == "invoice" && item.entityId in failedInvoiceFileIds) {
                 continue // Wait until binary files upload before writing invoice metadata
+            }
+            if (item.entityType == "invoice_file" || item.entityType == "invoice") {
+                _syncState.value = _syncState.value.copy(currentlyUploadingInvoiceId = item.entityId)
             }
             try {
                 val companyRef = fs.collection("companies").document(item.companyId)
@@ -853,16 +1157,53 @@ class CloudSyncManager(
                         error = formattedError
                     )
                 }
+                if (e !is InvoiceUploadException) {
+                    val classified = FirebaseServices.classifyBackendError(e)
+                    if (classified.health == BackendHealth.ACCESS_DENIED ||
+                        classified.health == BackendHealth.BACKEND_NOT_CONFIGURED ||
+                        classified.health == BackendHealth.NOT_SIGNED_IN ||
+                        classified.health == BackendHealth.OFFLINE
+                    ) {
+                        lastClassifiedHealth = classified.health
+                    }
+                }
+                lastErrorMsg = formattedError
                 _syncState.value = _syncState.value.copy(lastError = formattedError)
             }
         }
 
+        val remainingPending = runCatching { db.syncQueueDao().getPendingCountNow(targetCompanyId) }.getOrDefault(0)
+        val remainingFailed = runCatching { db.syncQueueDao().getFailedCountNow(targetCompanyId) }.getOrDefault(0)
+        val fullySyncedNow = allSucceeded && remainingPending == 0 && remainingFailed == 0
+        val completedAt = System.currentTimeMillis()
+
+        if (fullySyncedNow) {
+            repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNCED_AT, completedAt.toString())
+            repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, "")
+        } else if (!lastErrorMsg.isNullOrBlank()) {
+            repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, lastErrorMsg)
+        }
+
         _syncState.value = _syncState.value.copy(
             isSyncing = false,
-            isOnline = allSucceeded,
-            lastSyncedAt = if (allSucceeded) System.currentTimeMillis() else _syncState.value.lastSyncedAt
+            currentlyUploadingInvoiceId = null,
+            isOnline = allSucceeded && lastClassifiedHealth == BackendHealth.REACHABLE,
+            backendHealth = if (allSucceeded) BackendHealth.REACHABLE else lastClassifiedHealth,
+            lastSyncedAt = if (fullySyncedNow) completedAt else _syncState.value.lastSyncedAt,
+            lastError = if (fullySyncedNow) null else lastErrorMsg
         )
-        return allSucceeded
+
+        return when {
+            allSucceeded -> SyncFlushOutcome.SUCCEEDED
+            lastClassifiedHealth == BackendHealth.ACCESS_DENIED ||
+                lastClassifiedHealth == BackendHealth.BACKEND_NOT_CONFIGURED ->
+                SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED
+            lastClassifiedHealth == BackendHealth.NOT_SIGNED_IN ->
+                SyncFlushOutcome.NOT_SIGNED_IN
+            lastClassifiedHealth == BackendHealth.OFFLINE ->
+                SyncFlushOutcome.OFFLINE
+            else -> SyncFlushOutcome.FAILED_TRANSIENT
+        }
     }
 
     private fun buildFullInvoicePayload(iwp: InvoiceWithPages, finalStatus: String): MutableMap<String, Any?> {

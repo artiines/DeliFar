@@ -7,9 +7,12 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
+import com.delifar.app.cloud.CloudSyncManager
+import com.delifar.app.cloud.FirebaseServices
 import com.delifar.app.cloud.InvoiceSyncValidator
 import com.delifar.app.cloud.InvoiceUploadErrorCode
 import com.delifar.app.cloud.InvoiceUploadException
+import com.delifar.app.cloud.SyncFlushOutcome
 import com.delifar.app.data.DeliFarDatabase
 import com.delifar.app.data.DeliFarRepository
 import com.delifar.app.data.DraftItemInput
@@ -18,10 +21,15 @@ import com.delifar.app.data.HoursMode
 import com.delifar.app.data.InvoicePageEntity
 import com.delifar.app.data.InvoiceStatus
 import com.delifar.app.data.InvoiceWithPages
+import com.delifar.app.data.JobIssue
+import com.delifar.app.data.JobStatus
 import com.delifar.app.data.JobType
 import com.delifar.app.data.PrefKeys
 import com.delifar.app.data.SearchArea
 import com.delifar.app.data.StoreHoursEntity
+import com.delifar.app.data.SyncState
+import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
 import com.delifar.app.domain.BackupManager
 import com.delifar.app.domain.EncryptedArchiveBackupManager
 import com.delifar.app.network.AddressGeocoderService
@@ -1150,6 +1158,287 @@ class DeliFarDatabaseAndWorkflowTests {
         // Reuse blocked after acceptance
         val reuseAttempt = repo.redeemInvitationLocally(invite.inviteCode, "u_good2", "Driver Invited", "driver.invited@example.com")
         assertTrue(reuseAttempt.isFailure)
+    }
+
+    @Test
+    fun firebaseStartupAndOfflineStartup_initializeCleanlyWithoutCrashOrFakeSyncedState() = runTest {
+        val syncMgr = CloudSyncManager(context, db, repo)
+        val mappingIdRes = context.resources.getIdentifier(
+            "com.google.firebase.crashlytics.mapping_file_id",
+            "string",
+            context.packageName
+        )
+        val googleAppIdRes = context.resources.getIdentifier(
+            "google_app_id",
+            "string",
+            context.packageName
+        )
+
+        if (googleAppIdRes != 0) {
+            // Firebase-enabled build (google-services.json bundled):
+            // Crashlytics Gradle plugin MUST have generated mapping_file_id so FirebaseApp + Crashlytics never crash.
+            assertTrue(
+                "Crashlytics mapping_file_id must be generated whenever google-services.json is present",
+                mappingIdRes != 0 && context.getString(mappingIdRes).isNotBlank()
+            )
+            FirebaseServices.initializeIfConfigured(context)
+            assertTrue(FirebaseServices.isConfigured)
+            assertFalse(FirebaseServices.isAuthenticated)
+
+            // Flush when configured but not signed in must return NOT_SIGNED_IN (never SUCCEEDED)
+            val outcome = syncMgr.flushPendingQueueDetailed("cmp_test")
+            assertEquals(SyncFlushOutcome.NOT_SIGNED_IN, outcome)
+            assertNull(syncMgr.syncState.value.lastSyncedAt)
+        } else {
+            // Offline build (no google-services.json bundled):
+            // Startup must remain cleanly offline with zero crashes and never report synced.
+            FirebaseApp.getApps(context).forEach { runCatching { it.delete() } }
+            FirebaseServices.resetForTest()
+            FirebaseServices.initializeIfConfigured(context)
+
+            assertFalse(FirebaseServices.isConfigured)
+            assertFalse(FirebaseServices.isAuthenticated)
+            assertEquals(SyncFlushOutcome.NOT_CONFIGURED, syncMgr.flushPendingQueueDetailed("cmp_test"))
+            assertNull(syncMgr.syncState.value.lastSyncedAt)
+        }
+    }
+
+    @Test
+    fun offlineToCloudCompanyClaimAndSwitching_transfersOwnershipSafelyWithoutDuplicatesOrTheft() = runTest {
+        // 1. Create an offline company (local_* owner) with store & job
+        val localCompany = repo.registerCompany(
+            companyName = "Valley Fresh Offline",
+            ownerUid = "local_offline_owner_1",
+            ownerName = "Local Owner",
+            ownerEmail = "owner@valleyfresh.com",
+            timezone = "America/Los_Angeles",
+            defaultArea = SearchArea.LA
+        ).getOrThrow()
+
+        val store = repo.saveStore(
+            existingId = null,
+            name = "Valley Deli",
+            address = "100 Main St, Glendale, CA",
+            lat = 34.1425,
+            lon = -118.2551,
+            providerId = null,
+            phone = "818-555-0101",
+            hours = emptyList(),
+            companyId = localCompany.id,
+            actorUid = "local_offline_owner_1",
+            actorName = "Local Owner",
+            actorRole = EmployeeRole.OWNER,
+            locationConfirmed = true,
+            geocodeSource = GeocodeSource.MANUAL_PIN
+        ).getOrThrow()
+
+        repo.saveJobAtomically(
+            jobId = "job_local_1",
+            storeId = store.id,
+            type = JobType.DELIVERY,
+            dateIso = "2026-07-10",
+            timeIso = "09:30",
+            reminderEnabled = false,
+            items = listOf(DraftItemInput(name = "Milk", planned = "10", unit = "cs")),
+            assignedDriverUid = "local_offline_owner_1",
+            assignedDriverName = "Local Owner",
+            companyId = localCompany.id,
+            actorUid = "local_offline_owner_1",
+            actorName = "Local Owner",
+            actorRole = EmployeeRole.OWNER
+        ).getOrThrow()
+
+        assertEquals(1, repo.getOfflineOwnedCompanies().size)
+
+        // 2. Authenticated Firebase user claims the offline company explicitly
+        val claimed = repo.claimLocalCompanyForAuthenticatedUser(
+            localCompanyId = localCompany.id,
+            authUid = "firebase_uid_owner_A",
+            authName = "Armen Cloud",
+            authEmail = "armen@valleyfresh.com"
+        ).getOrThrow()
+
+        assertEquals(localCompany.id, claimed.id)
+        assertEquals("firebase_uid_owner_A", claimed.ownerUid)
+        assertTrue(repo.getOfflineOwnedCompanies().isEmpty())
+        // Zero duplicate stores or jobs
+        assertEquals(1, repo.observeStores(localCompany.id).first().size)
+        val jobsAfterClaim = repo.observeJobRows(localCompany.id).first()
+        assertEquals(1, jobsAfterClaim.size)
+        assertEquals("firebase_uid_owner_A", jobsAfterClaim.first().job.assignedDriverUid)
+
+        // 3. Re-claiming by the SAME owner is idempotent
+        assertTrue(
+            repo.claimLocalCompanyForAuthenticatedUser(
+                localCompany.id, "firebase_uid_owner_A", "Armen Cloud", "armen@valleyfresh.com"
+            ).isSuccess
+        )
+
+        // 4. Another Firebase user MUST BE BLOCKED from stealing the claimed company
+        val theftAttempt = repo.claimLocalCompanyForAuthenticatedUser(
+            localCompanyId = localCompany.id,
+            authUid = "firebase_uid_other_B",
+            authName = "Other User",
+            authEmail = "other@example.com"
+        )
+        assertTrue(theftAttempt.isFailure)
+        assertTrue(theftAttempt.exceptionOrNull() is SecurityException)
+
+        // 5. Company switching enforces active membership
+        val secondCompany = repo.registerCompany(
+            companyName = "Coast Distributors",
+            ownerUid = "firebase_uid_owner_A",
+            ownerName = "Armen Cloud",
+            ownerEmail = "armen@valleyfresh.com",
+            timezone = "America/Los_Angeles",
+            defaultArea = SearchArea.SAC
+        ).getOrThrow()
+        assertEquals(2, repo.getCompaniesForUser("firebase_uid_owner_A").size)
+
+        assertTrue(repo.switchActiveCompany(localCompany.id, "firebase_uid_owner_A").isSuccess)
+        assertEquals(localCompany.id, repo.getPreferences().activeCompanyId)
+        assertTrue(repo.switchActiveCompany(secondCompany.id, "firebase_uid_owner_A").isSuccess)
+        assertEquals(secondCompany.id, repo.getPreferences().activeCompanyId)
+
+        // Unauthorized user cannot switch into company A
+        val unauthSwitch = repo.switchActiveCompany(localCompany.id, "firebase_uid_other_B")
+        assertTrue(unauthSwitch.isFailure)
+        assertTrue(unauthSwitch.exceptionOrNull() is SecurityException)
+    }
+
+    @Test
+    fun invoiceRetryUpload_reportsExactMissingAttachmentAndRecoversCleanlyPreservingSignature() = runTest {
+        val tempDir = File(context.cacheDir, "inv_retry_test_${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val comp = repo.registerCompany(
+                "Retry Co", "u_owner", "Owner", "o@retry.com", "America/Los_Angeles", SearchArea.LA
+            ).getOrThrow()
+            val store = repo.saveStore(
+                null, "Retry Market", "200 Main St, Glendale, CA", 34.1425, -118.2551,
+                null, "", emptyList(), comp.id, "u_owner", "Owner", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+            ).getOrThrow()
+
+            val jpgBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 7, 8, 9)
+            val pngBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 4, 5)
+            val pdfBytes = "%PDF-1.4\n%%EOF\n".toByteArray(Charsets.US_ASCII)
+
+            val pageFile = File(tempDir, "page1.jpg").apply { writeBytes(jpgBytes) }
+            val sigFile = File(tempDir, "sig.png").apply { writeBytes(pngBytes) }
+            val pdfFile = File(tempDir, "signed.pdf").apply { writeBytes(pdfBytes) }
+
+            val created = repo.createInvoice(
+                companyId = comp.id,
+                jobId = null,
+                storeId = store.id,
+                storeName = store.name,
+                invoiceNumber = "INV-RETRY-7",
+                notes = "",
+                pages = listOf(
+                    InvoicePageEntity(
+                        id = "pg_retry_1",
+                        invoiceId = "inv_retry_1",
+                        pageIndex = 0,
+                        originalLocalPath = pageFile.absolutePath,
+                        editedLocalPath = pageFile.absolutePath,
+                        originalSha256 = InvoiceSyncValidator.sha256Bytes(jpgBytes),
+                        editedSha256 = InvoiceSyncValidator.sha256Bytes(jpgBytes),
+                        byteSize = pageFile.length()
+                    )
+                ),
+                actorUid = "u_owner",
+                actorName = "Owner",
+                actorRole = EmployeeRole.OWNER
+            ).getOrThrow()
+
+            val signed = repo.signInvoice(
+                invoiceId = created.invoice.id,
+                recipientName = "Maria Lopez",
+                recipientTitle = "Receiver",
+                acknowledgmentConfirmed = true,
+                signatureLocalPath = sigFile.absolutePath,
+                signaturePageIndex = 0,
+                signaturePosX = 0.5f,
+                signaturePosY = 0.8f,
+                signedPdfLocalPath = pdfFile.absolutePath,
+                signedPdfSha256 = InvoiceSyncValidator.sha256Bytes(pdfBytes),
+                signedPdfBytes = pdfFile.length(),
+                actorUid = "u_owner",
+                actorName = "Owner",
+                actorRole = EmployeeRole.OWNER,
+                companyId = comp.id
+            ).getOrThrow()
+
+            // Simulate missing signed PDF on device -> retryInvoiceUpload must fail clearly and explain why
+            pdfFile.delete()
+            val failRetry = repo.retryInvoiceUpload(signed.id, comp.id)
+            assertTrue(failRetry.isFailure)
+            val errMsg = failRetry.exceptionOrNull()!!.message.orEmpty()
+            assertTrue("Expected missing signed PDF diagnostic, got: $errMsg", errMsg.contains("Signed invoice PDF", ignoreCase = true))
+            val failedInv = repo.getInvoiceWithPages(signed.id, comp.id)!!.invoice
+            assertEquals(InvoiceStatus.UPLOAD_FAILED, failedInv.status)
+            assertTrue(failedInv.signed) // Signature metadata preserved!
+            assertEquals("Maria Lopez", failedInv.recipientName)
+
+            // Restore signed PDF -> retryInvoiceUpload succeeds and queues upload without losing signature/version
+            pdfFile.writeBytes(pdfBytes)
+            val recoverRetry = repo.retryInvoiceUpload(signed.id, comp.id)
+            assertTrue(recoverRetry.isSuccess)
+            val recoveredInv = repo.getInvoiceWithPages(signed.id, comp.id)!!.invoice
+            assertEquals(InvoiceStatus.PENDING_UPLOAD, recoveredInv.status)
+            assertEquals(SyncState.PENDING, recoveredInv.syncState)
+            assertTrue(recoveredInv.signed)
+            assertEquals(1, recoveredInv.version)
+            assertNull(recoveredInv.uploadError)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun driverDailyWorkflow_supportsQuickStartCompleteAndIssueReporting() = runTest {
+        val comp = repo.registerCompany(
+            "FastRoute Co", "owner_d", "Owner", "o@fast.com", "America/Los_Angeles", SearchArea.LA
+        ).getOrThrow()
+        val store = repo.saveStore(
+            null, "Fast Deli", "500 S Brand Blvd, Glendale, CA", 34.1395, -118.2551,
+            null, "818-555-0199",
+            listOf(StoreHoursEntity("", 1, HoursMode.OPEN, "07:00-14:00")),
+            comp.id, "owner_d", "Owner", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+        ).getOrThrow()
+        val job = repo.saveJobAtomically(
+            jobId = "drv_job_1",
+            storeId = store.id,
+            type = JobType.DELIVERY,
+            dateIso = "2026-07-15",
+            timeIso = "08:30",
+            reminderEnabled = true,
+            items = listOf(DraftItemInput(id = "item_1", name = "Lavash", planned = "20", unit = "cs")),
+            assignedDriverUid = "drv_fast",
+            assignedDriverName = "Hayk",
+            companyId = comp.id,
+            actorUid = "owner_d",
+            actorName = "Owner",
+            actorRole = EmployeeRole.OWNER
+        ).getOrThrow()
+
+        // Driver starts -> reports partial delivery -> completes
+        val started = repo.updateJobStatus(job.id, JobStatus.PROGRESS, "drv_fast", "Hayk", EmployeeRole.DRIVER, comp.id).getOrThrow()
+        assertEquals(JobStatus.PROGRESS, started.status)
+
+        val reported = repo.reportIssue(
+            jobId = job.id,
+            issueType = JobIssue.PARTIAL,
+            note = "4 cases short",
+            keepOpen = false,
+            actualQuantitiesByItemId = mapOf("item_1" to "16"),
+            actorUid = "drv_fast",
+            actorName = "Hayk",
+            actorRole = EmployeeRole.DRIVER,
+            companyId = comp.id
+        ).getOrThrow()
+        assertEquals(JobIssue.PARTIAL, reported.issue)
+        assertEquals(JobStatus.COMPLETED, reported.status)
+        assertEquals("16", db.jobDao().getJobWithItems(job.id)!!.items.first().actual)
     }
 
     private fun encryptTestArchive(zipBytes: ByteArray, passphrase: String): ByteArray {

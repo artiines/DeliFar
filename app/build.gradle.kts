@@ -4,9 +4,13 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
-// Activate Google Services plugin automatically whenever app/google-services.json is present
-if (file("google-services.json").exists()) {
+// Activate Google Services and Crashlytics plugins automatically whenever app/google-services.json is present.
+// Crashlytics Gradle plugin generates the required `com.google.firebase.crashlytics.mapping_file_id` resource
+// so CrashlyticsRegistrar does not throw IllegalStateException at app startup.
+val hasGoogleServicesConfig = file("google-services.json").exists()
+if (hasGoogleServicesConfig) {
     apply(plugin = "com.google.gms.google-services")
+    apply(plugin = "com.google.firebase.crashlytics")
 }
 
 android {
@@ -17,8 +21,8 @@ android {
         applicationId = "com.delifar.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "2.1.0"
+        versionCode = 4
+        versionName = "2.1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -32,6 +36,16 @@ android {
                 keyPassword = System.getenv("DELIFAR_DEBUG_KEY_PASSWORD")?.ifBlank { null } ?: "android"
             }
         }
+        create("releaseConfig") {
+            val relPath = System.getenv("DELIFAR_RELEASE_KEYSTORE_PATH")?.ifBlank { null }
+            val relFile = relPath?.let { file(it) } ?: file("${rootDir}/release.keystore")
+            if (relFile.exists()) {
+                storeFile = relFile
+                storePassword = System.getenv("DELIFAR_RELEASE_STORE_PASSWORD")?.ifBlank { null }
+                keyAlias = System.getenv("DELIFAR_RELEASE_KEY_ALIAS")?.ifBlank { null }
+                keyPassword = System.getenv("DELIFAR_RELEASE_KEY_PASSWORD")?.ifBlank { null }
+            }
+        }
     }
 
     buildTypes {
@@ -39,9 +53,21 @@ android {
             if (file("${rootDir}/debug.keystore").exists()) {
                 signingConfig = signingConfigs.getByName("debugConfig")
             }
+            if (hasGoogleServicesConfig) {
+                extensions.findByName("firebaseCrashlytics")?.let { ext ->
+                    // Generate the Crashlytics build/mapping ID resource without attempting network symbol upload on debug builds
+                    ext.javaClass.methods
+                        .firstOrNull { it.name == "setMappingFileUploadEnabled" && it.parameterCount == 1 }
+                        ?.invoke(ext, false)
+                }
+            }
         }
         release {
             isMinifyEnabled = false
+            val relSigning = signingConfigs.getByName("releaseConfig")
+            if (relSigning.storeFile != null && relSigning.storeFile!!.exists()) {
+                signingConfig = relSigning
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -113,8 +139,9 @@ dependencies {
     implementation("com.google.firebase:firebase-storage")
     implementation("com.google.firebase:firebase-messaging")
     implementation("com.google.firebase:firebase-functions")
-    implementation("com.google.firebase:firebase-appcheck-playintegrity")
-    implementation("com.google.firebase:firebase-appcheck-debug")
+    implementation("com.google.firebase:firebase-appcheck")
+    debugImplementation("com.google.firebase:firebase-appcheck-debug")
+    releaseImplementation("com.google.firebase:firebase-appcheck-playintegrity")
     implementation("com.google.firebase:firebase-crashlytics")
 
     // Automated unit & Room migration / Robolectric tests
@@ -124,7 +151,15 @@ dependencies {
     testImplementation("androidx.room:room-testing:2.7.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
 
+    // Real Android Emulator / device instrumentation startup smoke tests
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.09.00"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
 
 // Reproducibly prefetch Robolectric 4.14.1 Android instrumented runtime JARs via Gradle/Maven Central

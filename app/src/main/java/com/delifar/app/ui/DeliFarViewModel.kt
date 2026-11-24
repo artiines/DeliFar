@@ -5,8 +5,11 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.delifar.app.cloud.CloudSyncManager
+import com.delifar.app.cloud.CloudSyncStatus
 import com.delifar.app.cloud.CloudSyncUiState
 import com.delifar.app.cloud.FirebaseServices
+import com.delifar.app.cloud.SyncFlushOutcome
+import com.delifar.app.cloud.SyncStatusResolver
 import com.delifar.app.data.AppPreferences
 import com.delifar.app.data.AuditLogEntity
 import com.delifar.app.data.CompanyEntity
@@ -53,6 +56,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -137,7 +141,34 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         .flatMapLatest { companyId -> repository.observeFailedSyncCount(companyId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
+    val latestSyncError: StateFlow<String?> = activeCompanyIdFlow
+        .flatMapLatest { companyId -> repository.observeLatestSyncError(companyId) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     val syncState: StateFlow<CloudSyncUiState> = syncManager.syncState
+
+    val resolvedSyncStatus: StateFlow<CloudSyncStatus> = combine(
+        syncState,
+        pendingSyncCount,
+        failedSyncCount,
+        preferences,
+        latestSyncError
+    ) { state, pending, failed, prefs, queueErr ->
+        SyncStatusResolver.resolve(
+            state = state,
+            pendingCount = pending,
+            failedCount = failed,
+            activeCompanyId = prefs.activeCompanyId,
+            persistedLastSyncedAt = prefs.lastSyncedAt,
+            persistedLastError = queueErr ?: prefs.lastSyncError
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CloudSyncStatus.OFFLINE_SAVING_LOCALLY)
+
+    private val _offlineOwnedCompanies = MutableStateFlow<List<CompanyEntity>>(emptyList())
+    val offlineOwnedCompanies: StateFlow<List<CompanyEntity>> = _offlineOwnedCompanies.asStateFlow()
+
+    private val _userCompanies = MutableStateFlow<List<CompanyEntity>>(emptyList())
+    val userCompanies: StateFlow<List<CompanyEntity>> = _userCompanies.asStateFlow()
 
     private val _searchState = MutableStateFlow(PlaceSearchUiState())
     val searchState: StateFlow<PlaceSearchUiState> = _searchState.asStateFlow()
@@ -165,15 +196,38 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     init {
         rebuildReminders()
         viewModelScope.launch {
-            preferences.collect { prefs ->
-                if (prefs.activeCompanyId.isNotBlank() && FirebaseServices.isConfigured) {
-                    syncManager.startRealtimeListeners(
-                        companyId = prefs.activeCompanyId,
-                        userUid = prefs.activeUserUid,
-                        role = prefs.activeUserRole
+            preferences
+                .map { Triple(it.activeCompanyId, it.activeUserUid, it.activeUserRole) }
+                .distinctUntilChanged()
+                .collect { (companyId, userUid, role) ->
+                    val currentPrefs = preferences.value
+                    syncManager.refreshAuthAndConfigState(
+                        persistedLastSyncedAt = currentPrefs.lastSyncedAt,
+                        persistedLastError = currentPrefs.lastSyncError
                     )
+                    refreshCompanyListsInternal(FirebaseServices.currentAuthUid ?: userUid)
+                    if (companyId.isNotBlank() && FirebaseServices.isConfigured && FirebaseServices.isAuthenticated) {
+                        val authUid = FirebaseServices.currentAuthUid ?: userUid
+                        syncManager.startRealtimeListeners(
+                            companyId = companyId,
+                            userUid = authUid,
+                            role = role
+                        )
+                    } else {
+                        syncManager.stopListeners()
+                    }
                 }
-            }
+        }
+    }
+
+    private suspend fun refreshCompanyListsInternal(userUid: String) {
+        _offlineOwnedCompanies.value = runCatching { repository.getOfflineOwnedCompanies() }.getOrDefault(emptyList())
+        _userCompanies.value = runCatching { repository.getCompaniesForUser(userUid) }.getOrDefault(emptyList())
+    }
+
+    fun refreshCompanyLists() {
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshCompanyListsInternal(FirebaseServices.currentAuthUid ?: preferences.value.activeUserUid)
         }
     }
 
@@ -205,12 +259,30 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch(Dispatchers.IO) {
             val activeCompanyId = preferences.value.activeCompanyId
             repository.retryFailedSyncItems(activeCompanyId)
+            if (!FirebaseServices.isConfigured) {
+                syncManager.refreshAuthAndConfigState(preferences.value.lastSyncedAt, preferences.value.lastSyncError)
+                notifyMessage("Offline mode — changes are saved safely on this device.")
+                return@launch
+            }
+            if (!FirebaseServices.isAuthenticated) {
+                syncManager.refreshAuthAndConfigState(preferences.value.lastSyncedAt, preferences.value.lastSyncError)
+                notifyMessage("Firebase is configured, but you are not signed in. Sign in under Account & Company to sync.")
+                return@launch
+            }
             CloudSyncManager.scheduleBackgroundSync(appContext)
-            if (FirebaseServices.isConfigured) {
-                val ok = syncManager.flushPendingQueue(activeCompanyId)
-                notifyMessage(if (ok) "Cloud sync complete." else "Sync queued — will retry automatically when online.")
-            } else {
-                notifyMessage("Saved locally. Add google-services.json to enable live Firebase cloud sync.")
+            when (syncManager.flushPendingQueueDetailed(activeCompanyId)) {
+                SyncFlushOutcome.SUCCEEDED ->
+                    notifyMessage("Synchronized with Firebase cloud.")
+                SyncFlushOutcome.OFFLINE ->
+                    notifyMessage("Device is offline — changes are saved locally and queued for automatic upload.")
+                SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED ->
+                    notifyMessage(syncManager.syncState.value.lastError ?: "Cloud access denied or Firestore backend not configured yet.")
+                SyncFlushOutcome.NOT_SIGNED_IN ->
+                    notifyMessage("Authentication required. Sign in to sync.")
+                SyncFlushOutcome.NOT_CONFIGURED ->
+                    notifyMessage("Offline mode — Firebase config is not bundled in this build.")
+                SyncFlushOutcome.FAILED_TRANSIENT ->
+                    notifyMessage(syncManager.syncState.value.lastError ?: "Some items failed to upload. Check Sync status or Invoices to retry.")
             }
         }
     }
@@ -223,10 +295,19 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         return runCatching {
             val res = auth.signInWithEmailAndPassword(email.trim(), password).await()
             val user = res.user ?: throw IllegalStateException("Authentication failed.")
+            val displayName = user.displayName ?: email.substringBefore("@")
             repository.setPreference(PrefKeys.ACTIVE_USER_UID, user.uid)
             repository.setPreference(PrefKeys.ACTIVE_USER_EMAIL, user.email.orEmpty())
-            repository.setPreference(PrefKeys.ACTIVE_USER_NAME, user.displayName ?: email.substringBefore("@"))
-            triggerSyncNow()
+            repository.setPreference(PrefKeys.ACTIVE_USER_NAME, displayName)
+            reconcileCompanyContextAfterFirebaseAuth(user.uid)
+            syncManager.refreshAuthAndConfigState(preferences.value.lastSyncedAt, null)
+            val activeId = repository.getPreferences().activeCompanyId
+            if (activeId.isNotBlank()) {
+                val activeComp = repository.getCompany(activeId)
+                if (activeComp != null && !activeComp.ownerUid.startsWith("local_")) {
+                    triggerSyncNow()
+                }
+            }
         }
     }
 
@@ -238,16 +319,98 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             repository.setPreference(PrefKeys.ACTIVE_USER_UID, localUid)
             repository.setPreference(PrefKeys.ACTIVE_USER_NAME, name.trim().ifEmpty { email.substringBefore("@") })
             repository.setPreference(PrefKeys.ACTIVE_USER_EMAIL, email.trim().lowercase())
+            refreshCompanyListsInternal(localUid)
             return Result.success(Unit)
         }
         return runCatching {
             val res = auth.createUserWithEmailAndPassword(email.trim(), password).await()
             val user = res.user ?: throw IllegalStateException("Registration failed.")
-            val req = UserProfileChangeRequest.Builder().setDisplayName(name.trim()).build()
+            val cleanName = name.trim().ifEmpty { email.substringBefore("@") }
+            val req = UserProfileChangeRequest.Builder().setDisplayName(cleanName).build()
             runCatching { user.updateProfile(req).await() }
             repository.setPreference(PrefKeys.ACTIVE_USER_UID, user.uid)
             repository.setPreference(PrefKeys.ACTIVE_USER_EMAIL, user.email.orEmpty())
-            repository.setPreference(PrefKeys.ACTIVE_USER_NAME, name.trim())
+            repository.setPreference(PrefKeys.ACTIVE_USER_NAME, cleanName)
+            reconcileCompanyContextAfterFirebaseAuth(user.uid)
+            syncManager.refreshAuthAndConfigState(preferences.value.lastSyncedAt, null)
+        }
+    }
+
+    /**
+     * Ensures signing into a Firebase account NEVER silently assigns a locally created company
+     * or another Firebase user's company to the wrong authenticated user.
+     */
+    private suspend fun reconcileCompanyContextAfterFirebaseAuth(authUid: String) {
+        val currentPrefs = repository.getPreferences()
+        val currentCompanyId = currentPrefs.activeCompanyId
+        val ownedOffline = repository.getOfflineOwnedCompanies()
+        val memberCompanies = repository.getCompaniesForUser(authUid)
+
+        if (currentCompanyId.isNotBlank()) {
+            val activeComp = repository.getCompany(currentCompanyId)
+            val isMember = memberCompanies.any { it.id == currentCompanyId }
+            if (activeComp == null || (!isMember && !activeComp.ownerUid.startsWith("local_"))) {
+                // Active company belongs to a different cloud account -> clear it safely
+                repository.setPreference(PrefKeys.ACTIVE_COMPANY_ID, "")
+                repository.setPreference(PrefKeys.ACTIVE_USER_ROLE, EmployeeRole.OWNER)
+                repository.setPreference(PrefKeys.LAST_SYNC_ERROR, "")
+            } else if (activeComp.ownerUid.startsWith("local_")) {
+                // Pause active cloud sync on local_* company until user explicitly confirms claiming it
+                repository.setPreference(PrefKeys.ACTIVE_COMPANY_ID, "")
+                repository.setPreference(PrefKeys.LAST_SYNC_ERROR, "")
+            }
+        }
+
+        // If user is already an active member of a cloud company and has no active company selected, select it
+        val refreshedCompanyId = repository.getPreferences().activeCompanyId
+        if (refreshedCompanyId.isBlank() && memberCompanies.size == 1) {
+            repository.switchActiveCompany(memberCompanies.first().id, authUid)
+        }
+
+        _offlineOwnedCompanies.value = ownedOffline
+        _userCompanies.value = memberCompanies
+    }
+
+    suspend fun claimLocalCompany(localCompanyId: String): Result<CompanyEntity> {
+        val authUser = FirebaseServices.authOrNull()?.currentUser
+            ?: return Result.failure(IllegalStateException("Sign in to your Firebase account before claiming an offline company."))
+        val prefs = preferences.value
+        val res = repository.claimLocalCompanyForAuthenticatedUser(
+            localCompanyId = localCompanyId,
+            authUid = authUser.uid,
+            authName = authUser.displayName?.takeIf { it.isNotBlank() } ?: prefs.activeUserName,
+            authEmail = authUser.email?.takeIf { it.isNotBlank() } ?: prefs.activeUserEmail
+        )
+        res.onSuccess { claimed ->
+            refreshCompanyListsInternal(authUser.uid)
+            triggerSyncNow()
+            notifyMessage("Offline company '${claimed.name}' linked to your cloud account.")
+        }
+        return res
+    }
+
+    suspend fun switchCompany(companyId: String): Result<CompanyEntity> {
+        val uid = FirebaseServices.currentAuthUid ?: preferences.value.activeUserUid
+        val res = repository.switchActiveCompany(companyId, uid)
+        res.onSuccess { switched ->
+            refreshCompanyListsInternal(uid)
+            rebuildReminders()
+            notifyMessage("Switched to ${switched.name}.")
+        }
+        res.onFailure { notifyMessage(it.message ?: "Could not switch company.") }
+        return res
+    }
+
+    fun selectOfflineRole(role: String) {
+        if (role !in EmployeeRole.ALL) return
+        viewModelScope.launch {
+            repository.setPreference(PrefKeys.ACTIVE_USER_ROLE, role)
+        }
+    }
+
+    fun dismissOnboarding() {
+        viewModelScope.launch {
+            repository.setPreference(PrefKeys.ONBOARDING_DISMISSED, "true")
         }
     }
 
@@ -260,6 +423,9 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             repository.setPreference(PrefKeys.ACTIVE_USER_EMAIL, "")
             repository.setPreference(PrefKeys.ACTIVE_USER_NAME, "")
             repository.setPreference(PrefKeys.ACTIVE_USER_ROLE, EmployeeRole.OWNER)
+            repository.setPreference(PrefKeys.LAST_SYNC_ERROR, "")
+            syncManager.refreshAuthAndConfigState(preferences.value.lastSyncedAt, null)
+            refreshCompanyListsInternal("")
             clearSearchState()
             clearRoutePlan()
             rebuildReminders()
@@ -285,6 +451,7 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             defaultArea = defaultArea
         )
         res.onSuccess {
+            refreshCompanyListsInternal(uid)
             CloudSyncManager.scheduleBackgroundSync(appContext)
             checkUnmigratedLocalData()
             notifyMessage("Company '${it.name}' registered.")
@@ -353,6 +520,7 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             email = email.ifBlank { p.activeUserEmail }
         )
         res.onSuccess {
+            refreshCompanyListsInternal(uid)
             CloudSyncManager.scheduleBackgroundSync(appContext)
             notifyMessage("Joined company successfully.")
         }
@@ -650,9 +818,20 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             res.onSuccess {
                 CloudSyncManager.scheduleBackgroundSync(appContext)
                 rebuildReminders()
+                val label = when (newStatus) {
+                    com.delifar.app.data.JobStatus.PROGRESS -> "Started"
+                    com.delifar.app.data.JobStatus.COMPLETED -> "Completed"
+                    com.delifar.app.data.JobStatus.CANCELED -> "Canceled"
+                    else -> "Updated"
+                }
+                notifyMessage("$label: ${it.snapshotName}")
             }
         }
     }
+
+    fun quickStartJob(jobId: String) = updateJobStatus(jobId, com.delifar.app.data.JobStatus.PROGRESS)
+
+    fun quickCompleteJob(jobId: String) = updateJobStatus(jobId, com.delifar.app.data.JobStatus.COMPLETED)
 
     fun rescheduleJob(jobId: String, newDate: String, newTime: String?) {
         viewModelScope.launch {
@@ -806,6 +985,30 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             res.onSuccess {
                 CloudSyncManager.scheduleBackgroundSync(appContext)
                 notifyMessage("Invoice #${it.invoiceNumber} marked voided.")
+            }
+        }
+    }
+
+    fun retryInvoiceUpload(invoiceId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val activeCompanyId = preferences.value.activeCompanyId
+            val res = repository.retryInvoiceUpload(invoiceId, activeCompanyId)
+            res.onFailure { err ->
+                notifyMessage(err.message ?: "Invoice files could not be verified for upload.")
+            }
+            res.onSuccess {
+                if (FirebaseServices.isConfigured && FirebaseServices.isAuthenticated) {
+                    CloudSyncManager.scheduleBackgroundSync(appContext)
+                    when (syncManager.flushPendingQueueDetailed(activeCompanyId)) {
+                        SyncFlushOutcome.SUCCEEDED -> notifyMessage("Invoice uploaded and synchronized.")
+                        SyncFlushOutcome.OFFLINE -> notifyMessage("Invoice queued — will upload automatically when online.")
+                        else -> notifyMessage(syncManager.syncState.value.lastError ?: "Invoice upload retry failed.")
+                    }
+                } else if (!FirebaseServices.isConfigured) {
+                    notifyMessage("Invoice saved locally. Firebase is not configured in this build.")
+                } else {
+                    notifyMessage("Invoice queued locally. Sign in under Account & Company to upload.")
+                }
             }
         }
     }

@@ -30,13 +30,39 @@
     <string name="role_driver">Водитель</string>
     <string name="role_accountant">Бухгалтер</string>
 
-    <string name="sync_synced">Синхронизировано</string>
+    <string name="sync_synced">Полностью синхронизировано</string>
     <string name="sync_syncing">Синхронизация…</string>
-    <string name="sync_pending">Ожидает загрузки: %1$d</string>
-    <string name="sync_failed">Ошибка загрузки (%1$d) — повторить</string>
-    <string name="sync_offline_mode">Офлайн-режим</string>
-    <string name="sync_now">Синхронизировать</string>
+    <string name="sync_connecting">Подключение к облаку…</string>
+    <string name="sync_pending">Ожидает загрузки (%1$d)</string>
+    <string name="sync_failed">Ошибка синхронизации (%1$d)</string>
+    <string name="sync_offline_mode">Офлайн — сохранение локально</string>
+    <string name="sync_configured_not_signed_in">Firebase настроен — вход не выполнен</string>
+    <string name="sync_auth_required">Требуется авторизация</string>
+    <string name="sync_access_denied">Нет доступа или сервер не настроен</string>
+    <string name="sync_now">Повторить</string>
+    <string name="sync_status_title">Облачная синхронизация</string>
+    <string name="sync_last_synced">Последняя синхронизация: %1$s</string>
+    <string name="sync_never_synced">Синхронизация ещё не выполнялась</string>
     <string name="reset_defaults">Сбросить</string>
+
+    <string name="setup_checklist_title">Быстрая настройка</string>
+    <string name="setup_checklist_subtitle">Работайте офлайн или подключите команду к Firebase.</string>
+    <string name="setup_step_account">Режим и аккаунт</string>
+    <string name="setup_step_company">Компания и роль</string>
+    <string name="setup_step_store">Добавить первый магазин</string>
+    <string name="setup_step_delivery">Запланировать первую доставку</string>
+    <string name="setup_dismiss">Скрыть</string>
+    <string name="next_stop_title">Следующая остановка</string>
+    <string name="quick_invoice_action">Накладная</string>
+    <string name="quick_issue_action">Проблема</string>
+    <string name="claim_offline_company_title">Привязать локальную компанию к облаку</string>
+    <string name="claim_offline_company_action">Привязать и синхр.</string>
+    <string name="switch_company_title">Переключить компанию</string>
+    <string name="invoice_status_saved_locally">Сохранено локально</string>
+    <string name="invoice_status_uploading">Загрузка…</string>
+    <string name="invoice_status_uploaded">Загружено</string>
+    <string name="invoice_status_signed_synced">Подписана и синхронизирована</string>
+    <string name="retry_upload">Повторить загрузку</string>
 
     <string name="account_and_company">Аккаунт и компания</string>
     <string name="sign_in">Войти</string>
@@ -263,6 +289,6 @@
     <string name="settings_allow_osm_fallback">Резервный геокодер OSM</string>
     <string name="settings_geocoding_url">URL сервера геокодирования (Nominatim HTTPS)</string>
     <string name="settings_routing_url">URL сервера маршрутизации (OSRM HTTPS, необяз.)</string>
-    <string name="settings_about">О DeliFar 2.0</string>
+    <string name="settings_about">О DeliFar 2.1</string>
     <string name="about_text">Платформа для управления доставками, заборами и подписанием накладных с MapLibre, OpenFreeMap, OpenStreetMap и Firebase.</string>
 </resources>

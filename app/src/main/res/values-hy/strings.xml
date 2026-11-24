@@ -30,13 +30,39 @@
     <string name="role_driver">Վարորդ</string>
     <string name="role_accountant">Հաշվապահ</string>
 
-    <string name="sync_synced">Համաժամեցված է</string>
+    <string name="sync_synced">Ամբողջությամբ համաժամեցված է</string>
     <string name="sync_syncing">Համաժամեցում…</string>
-    <string name="sync_pending">Սպասում է վերբեռնման՝ %1$d</string>
-    <string name="sync_failed">Վերբեռնման սխալ (%1$d) — կրկնել</string>
-    <string name="sync_offline_mode">Օֆլայն ռեժիմ</string>
-    <string name="sync_now">Համաժամեցնել</string>
+    <string name="sync_connecting">Միացում ամպին…</string>
+    <string name="sync_pending">Սպասում է վերբեռնման (%1$d)</string>
+    <string name="sync_failed">Համաժամեցման սխալ (%1$d)</string>
+    <string name="sync_offline_mode">Օֆլայն — պահվում է տեղում</string>
+    <string name="sync_configured_not_signed_in">Firebase-ը կարգավորված է — մուտք չի գործված</string>
+    <string name="sync_auth_required">Պահանջվում է մուտք</string>
+    <string name="sync_access_denied">Մուտքն արգելված է կամ սերվերը չի կարգավորված</string>
+    <string name="sync_now">Կրկնել</string>
+    <string name="sync_status_title">Ամպային համաժամեցում</string>
+    <string name="sync_last_synced">Վերջին համաժամեցումը՝ %1$s</string>
+    <string name="sync_never_synced">Դեռ համաժամեցված չէ</string>
     <string name="reset_defaults">Վերականգնել</string>
+
+    <string name="setup_checklist_title">Արագ կարգավորում</string>
+    <string name="setup_checklist_subtitle">Աշխատեք օֆլայն կամ միացրեք թիմը Firebase-ին։</string>
+    <string name="setup_step_account">Ռեժիմ և հաշիվ</string>
+    <string name="setup_step_company">Ընկերություն և դեր</string>
+    <string name="setup_step_store">Ավելացնել առաջին խանութը</string>
+    <string name="setup_step_delivery">Պլանավորել առաջին առաքումը</string>
+    <string name="setup_dismiss">Փակել</string>
+    <string name="next_stop_title">Հաջորդ կանգառը</string>
+    <string name="quick_invoice_action">Հաշիվ</string>
+    <string name="quick_issue_action">Խնդիր</string>
+    <string name="claim_offline_company_title">Կապել օֆլայն ընկերությունը ամպի հետ</string>
+    <string name="claim_offline_company_action">Կապել և համաժ.</string>
+    <string name="switch_company_title">Փոխել ընկերությունը</string>
+    <string name="invoice_status_saved_locally">Պահպանված է տեղում</string>
+    <string name="invoice_status_uploading">Վերբեռնում…</string>
+    <string name="invoice_status_uploaded">Վերբեռնված է</string>
+    <string name="invoice_status_signed_synced">Ստորագրված և համաժամեցված</string>
+    <string name="retry_upload">Կրկնել վերբեռնումը</string>
 
     <string name="account_and_company">Հաշիվ և ընկերություն</string>
     <string name="sign_in">Մուտք գործել</string>
@@ -263,6 +289,6 @@
     <string name="settings_allow_osm_fallback">Միացնել OSM գեոկոդավորման պահեստային տարբերակը</string>
     <string name="settings_geocoding_url">Գեոկոդավորման սերվերի URL (Nominatim HTTPS)</string>
     <string name="settings_routing_url">Երթուղու սերվերի URL (OSRM HTTPS, ըստ ցանկության)</string>
-    <string name="settings_about">DeliFar 2.0-ի մասին</string>
+    <string name="settings_about">DeliFar 2.1-ի մասին</string>
     <string name="about_text">Առաքումների, վերցնումների և հաշիվների ստորագրման հարթակ՝ MapLibre, OpenFreeMap, OpenStreetMap և Firebase տեխնոլոգիաներով։</string>
 </resources>

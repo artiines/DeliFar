@@ -34,13 +34,40 @@
     <string name="role_accountant">Accountant</string>
 
     <!-- Cloud & Sync -->
-    <string name="sync_synced">Synced</string>
-    <string name="sync_syncing">Syncing…</string>
-    <string name="sync_pending">%1$d pending upload</string>
-    <string name="sync_failed">%1$d upload failed — tap to retry</string>
-    <string name="sync_offline_mode">Offline Mode</string>
-    <string name="sync_now">Sync Now</string>
+    <string name="sync_synced">Fully synchronized</string>
+    <string name="sync_syncing">Synchronizing…</string>
+    <string name="sync_connecting">Connecting to cloud…</string>
+    <string name="sync_pending">Upload pending (%1$d)</string>
+    <string name="sync_failed">Synchronization failed (%1$d)</string>
+    <string name="sync_offline_mode">Offline — saving locally</string>
+    <string name="sync_configured_not_signed_in">Firebase configured — not signed in</string>
+    <string name="sync_auth_required">Authentication required</string>
+    <string name="sync_access_denied">Access denied or backend not configured</string>
+    <string name="sync_now">Retry Sync</string>
+    <string name="sync_status_title">Cloud Synchronization</string>
+    <string name="sync_last_synced">Last successful sync: %1$s</string>
+    <string name="sync_never_synced">Never synchronized yet</string>
     <string name="reset_defaults">Reset Defaults</string>
+
+    <!-- Onboarding & Driver Quick Workflow -->
+    <string name="setup_checklist_title">Quick Setup</string>
+    <string name="setup_checklist_subtitle">Get started offline or connect your team to Firebase.</string>
+    <string name="setup_step_account">Mode &amp; Account</string>
+    <string name="setup_step_company">Company &amp; Role</string>
+    <string name="setup_step_store">Add First Store</string>
+    <string name="setup_step_delivery">Schedule First Delivery</string>
+    <string name="setup_dismiss">Dismiss</string>
+    <string name="next_stop_title">Next Scheduled Stop</string>
+    <string name="quick_invoice_action">Invoice</string>
+    <string name="quick_issue_action">Issue</string>
+    <string name="claim_offline_company_title">Link Offline Company to Cloud</string>
+    <string name="claim_offline_company_action">Claim &amp; Sync</string>
+    <string name="switch_company_title">Switch Company</string>
+    <string name="invoice_status_saved_locally">Saved locally</string>
+    <string name="invoice_status_uploading">Uploading…</string>
+    <string name="invoice_status_uploaded">Uploaded</string>
+    <string name="invoice_status_signed_synced">Signed &amp; synchronized</string>
+    <string name="retry_upload">Retry Upload</string>
 
     <!-- Auth & Company -->
     <string name="account_and_company">Account &amp; Company</string>
@@ -278,6 +305,6 @@
     <string name="settings_allow_osm_fallback">Enable OSM Geocoding Fallback</string>
     <string name="settings_geocoding_url">Geocoding Server URL (Nominatim HTTPS)</string>
     <string name="settings_routing_url">Routing Server URL (OSRM HTTPS, optional)</string>
-    <string name="settings_about">About DeliFar 2.0</string>
+    <string name="settings_about">About DeliFar 2.1</string>
     <string name="about_text">Offline-first, cloud-ready delivery, pickup, and invoice signing platform using MapLibre Native, OpenFreeMap vector tiles, OpenStreetMap geocoding, and Firebase.</string>
 </resources>

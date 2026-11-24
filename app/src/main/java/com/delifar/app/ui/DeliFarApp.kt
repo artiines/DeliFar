@@ -87,6 +87,7 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
     val company by viewModel.activeCompany.collectAsState()
     val latestDraft by viewModel.latestDraft.collectAsState()
     val syncState by viewModel.syncState.collectAsState()
+    val resolvedSyncStatus by viewModel.resolvedSyncStatus.collectAsState()
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsState()
     val failedSyncCount by viewModel.failedSyncCount.collectAsState()
 
@@ -155,11 +156,15 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
                 topBar = {
                     Column(modifier = Modifier.statusBarsPadding()) {
                         SyncStatusBanner(
+                            status = resolvedSyncStatus,
                             syncState = syncState,
                             pendingCount = pendingSyncCount,
                             failedCount = failedSyncCount,
                             companyName = company?.name,
-                            onTapSync = { viewModel.triggerSyncNow() }
+                            lastSyncedAt = prefs.lastSyncedAt,
+                            zoneId = zoneId,
+                            onTapSync = { viewModel.triggerSyncNow() },
+                            onTapOpenAccount = { navController.navigate(Routes.ACCOUNT) }
                         )
                     }
                 },
@@ -202,7 +207,10 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
                             zoneId = zoneId,
                             userRole = prefs.activeUserRole,
                             companyName = company?.name,
+                            hasAccount = prefs.activeUserUid.isNotBlank(),
+                            onboardingDismissed = prefs.onboardingDismissed,
                             onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                            onOpenAccount = { navController.navigate(Routes.ACCOUNT) },
                             onOpenTeam = { navController.navigate(Routes.TEAM) },
                             onNewJob = { navController.navigate(Routes.JOB_EDITOR) },
                             onResumeDraft = { draft ->
@@ -210,7 +218,14 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
                             },
                             onDiscardDraft = { draftId -> viewModel.discardDraft(draftId) },
                             onOpenJob = { jobId -> navController.navigate("${Routes.JOB_DETAIL}/$jobId") },
-                            onAddStore = { navController.navigate(Routes.STORE_EDITOR) }
+                            onAddStore = { navController.navigate(Routes.STORE_EDITOR) },
+                            onQuickStartJob = { jobId -> viewModel.quickStartJob(jobId) },
+                            onQuickCompleteJob = { jobId -> viewModel.quickCompleteJob(jobId) },
+                            onAddInvoiceForJob = { jobId, storeId ->
+                                navController.navigate("${Routes.INVOICE_CAPTURE}?jobId=$jobId&storeId=$storeId")
+                            },
+                            onDismissOnboarding = { viewModel.dismissOnboarding() },
+                            onNotify = { msg -> viewModel.notifyMessage(msg) }
                         )
                     }
 

@@ -50,6 +50,7 @@ import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.SymbolLayer
+import org.maplibre.android.style.sources.GeoJsonOptions
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
@@ -68,6 +69,8 @@ data class MapStorePin(
 private const val ROUTE_SOURCE_ID = "delifar-route-source"
 private const val ROUTE_LAYER_ID = "delifar-route-layer"
 private const val PINS_SOURCE_ID = "delifar-pins-source"
+private const val PINS_CLUSTER_LAYER_ID = "delifar-pins-cluster-layer"
+private const val PINS_CLUSTER_COUNT_LAYER_ID = "delifar-pins-cluster-count-layer"
 private const val PINS_HALO_LAYER_ID = "delifar-pins-halo-layer"
 private const val PINS_CIRCLE_LAYER_ID = "delifar-pins-circle-layer"
 private const val PINS_LABEL_LAYER_ID = "delifar-pins-label-layer"
@@ -149,7 +152,11 @@ fun DeliFarMapLibreView(
         if (existingPinSource != null) {
             existingPinSource.setGeoJson(pinCollection)
         } else {
-            style.addSource(GeoJsonSource(PINS_SOURCE_ID, pinCollection))
+            val clusterOptions = GeoJsonOptions()
+                .withCluster(true)
+                .withClusterMaxZoom(13)
+                .withClusterRadius(44)
+            style.addSource(GeoJsonSource(PINS_SOURCE_ID, pinCollection, clusterOptions))
         }
 
         // Update route GeoJSON
@@ -181,6 +188,36 @@ fun DeliFarMapLibreView(
             PropertyFactory.lineDasharray(if (latestStreetRoute) arrayOf(1f, 0f) else arrayOf(2.5f, 1.5f))
         )
 
+        if (style.getLayer(PINS_CLUSTER_LAYER_ID) == null) {
+            val clusterLayer = CircleLayer(PINS_CLUSTER_LAYER_ID, PINS_SOURCE_ID).withProperties(
+                PropertyFactory.circleRadius(
+                    Expression.step(
+                        Expression.get("point_count"),
+                        Expression.literal(17.0f),
+                        Expression.stop(10, 20.0f),
+                        Expression.stop(50, 24.0f)
+                    )
+                ),
+                PropertyFactory.circleColor(AndroidColor.parseColor("#183A37")),
+                PropertyFactory.circleStrokeWidth(2.5f),
+                PropertyFactory.circleStrokeColor(AndroidColor.WHITE)
+            )
+            clusterLayer.setFilter(Expression.has("point_count"))
+            style.addLayer(clusterLayer)
+        }
+
+        if (style.getLayer(PINS_CLUSTER_COUNT_LAYER_ID) == null) {
+            val clusterCountLayer = SymbolLayer(PINS_CLUSTER_COUNT_LAYER_ID, PINS_SOURCE_ID).withProperties(
+                PropertyFactory.textField(Expression.toString(Expression.get("point_count"))),
+                PropertyFactory.textSize(12.5f),
+                PropertyFactory.textColor(AndroidColor.WHITE),
+                PropertyFactory.textIgnorePlacement(true),
+                PropertyFactory.textAllowOverlap(true)
+            )
+            clusterCountLayer.setFilter(Expression.has("point_count"))
+            style.addLayer(clusterCountLayer)
+        }
+
         if (style.getLayer(PINS_HALO_LAYER_ID) == null) {
             val haloLayer = CircleLayer(PINS_HALO_LAYER_ID, PINS_SOURCE_ID).withProperties(
                 PropertyFactory.circleRadius(
@@ -199,6 +236,7 @@ fun DeliFarMapLibreView(
                 ),
                 PropertyFactory.circleOpacity(0.95f)
             )
+            haloLayer.setFilter(Expression.not(Expression.has("point_count")))
             style.addLayer(haloLayer)
         }
 
@@ -215,6 +253,7 @@ fun DeliFarMapLibreView(
                 PropertyFactory.circleStrokeWidth(2.0f),
                 PropertyFactory.circleStrokeColor(AndroidColor.WHITE)
             )
+            circleLayer.setFilter(Expression.not(Expression.has("point_count")))
             style.addLayer(circleLayer)
         }
 
@@ -229,6 +268,7 @@ fun DeliFarMapLibreView(
                 PropertyFactory.textHaloWidth(1.5f),
                 PropertyFactory.textAllowOverlap(false)
             )
+            labelLayer.setFilter(Expression.not(Expression.has("point_count")))
             style.addLayer(labelLayer)
         }
     }
@@ -318,11 +358,25 @@ fun DeliFarMapLibreView(
                         map.addOnMapClickListener { latLng ->
                             val screenPoint = map.projection.toScreenLocation(latLng)
                             val hitBox = RectF(
-                                screenPoint.x - 36f,
-                                screenPoint.y - 36f,
-                                screenPoint.x + 36f,
-                                screenPoint.y + 36f
+                                screenPoint.x - 40f,
+                                screenPoint.y - 40f,
+                                screenPoint.x + 40f,
+                                screenPoint.y + 40f
                             )
+                            val clusterHits = map.queryRenderedFeatures(hitBox, PINS_CLUSTER_LAYER_ID)
+                            if (clusterHits.isNotEmpty()) {
+                                val nextZoom = (map.cameraPosition.zoom + 2.2).coerceAtMost(16.0)
+                                map.animateCamera(
+                                    CameraUpdateFactory.newCameraPosition(
+                                        CameraPosition.Builder()
+                                            .target(latLng)
+                                            .zoom(nextZoom)
+                                            .build()
+                                    ),
+                                    320
+                                )
+                                return@addOnMapClickListener true
+                            }
                             val hitFeatures = map.queryRenderedFeatures(hitBox, PINS_CIRCLE_LAYER_ID, PINS_HALO_LAYER_ID)
                             val storeId = hitFeatures.firstOrNull()?.getStringProperty("storeId")
                             if (!storeId.isNullOrBlank()) {
@@ -346,7 +400,7 @@ fun DeliFarMapLibreView(
             }
         )
 
-        // One-handed zoom & recenter controls
+        // One-handed zoom & recenter controls (44dp comfortable touch targets)
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
@@ -358,21 +412,21 @@ fun DeliFarMapLibreView(
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 IconButton(
                     onClick = { mapLibreMap?.animateCamera(CameraUpdateFactory.zoomIn(), 250) },
-                    modifier = Modifier.size(38.dp)
+                    modifier = Modifier.size(44.dp)
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "Zoom in", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Add, contentDescription = "Zoom in", modifier = Modifier.size(20.dp))
                 }
                 IconButton(
                     onClick = { mapLibreMap?.animateCamera(CameraUpdateFactory.zoomOut(), 250) },
-                    modifier = Modifier.size(38.dp)
+                    modifier = Modifier.size(44.dp)
                 ) {
-                    Icon(Icons.Default.Remove, contentDescription = "Zoom out", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Remove, contentDescription = "Zoom out", modifier = Modifier.size(20.dp))
                 }
                 IconButton(
                     onClick = { mapLibreMap?.let { fitCameraToPins(it) } },
-                    modifier = Modifier.size(38.dp)
+                    modifier = Modifier.size(44.dp)
                 ) {
-                    Icon(Icons.Default.CenterFocusStrong, contentDescription = "Fit stops", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.CenterFocusStrong, contentDescription = "Fit stops", modifier = Modifier.size(20.dp))
                 }
             }
         }

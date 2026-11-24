@@ -155,6 +155,78 @@ object InvoiceSyncValidator {
         }
     }
 
+    /**
+     * Checks local files that still need to be uploaded and returns human-readable explanations
+     * for any missing, empty, oversized, or corrupted image/signature/PDF so users know exactly
+     * what needs attention before retrying an upload.
+     */
+    fun inspectLocalAttachmentIssues(iwp: InvoiceWithPages): List<String> {
+        val issues = mutableListOf<String>()
+        val inv = iwp.invoice
+        if (iwp.sortedPages.isEmpty()) {
+            issues += "No invoice pages are attached."
+            return issues
+        }
+        for (page in iwp.sortedPages) {
+            val pageNum = page.pageIndex + 1
+            if (page.originalStoragePath.isNullOrBlank()) {
+                runCatching {
+                    validateLocalAttachment(
+                        localPath = page.originalLocalPath,
+                        label = "Page $pageNum original photo",
+                        expectedMimeType = page.mimeType.ifBlank { "image/jpeg" },
+                        expectedSha256 = page.originalSha256
+                    )
+                }.onFailure { err ->
+                    issues += (err.message ?: "Page $pageNum original photo is missing or unreadable.")
+                }
+            }
+            if (page.editedStoragePath.isNullOrBlank()) {
+                val editedPath = page.editedLocalPath?.ifBlank { null } ?: page.originalLocalPath
+                runCatching {
+                    validateLocalAttachment(
+                        localPath = editedPath,
+                        label = "Page $pageNum scan image",
+                        expectedMimeType = page.mimeType.ifBlank { "image/jpeg" },
+                        expectedSha256 = page.editedSha256?.ifBlank { null }
+                    )
+                }.onFailure { err ->
+                    issues += (err.message ?: "Page $pageNum scan image is missing or unreadable.")
+                }
+            }
+        }
+        if (inv.signed) {
+            if (inv.signatureStoragePath.isNullOrBlank()) {
+                runCatching {
+                    validateLocalAttachment(
+                        localPath = inv.signatureLocalPath,
+                        label = "Customer signature image",
+                        expectedMimeType = "image/png"
+                    )
+                }.onFailure { err ->
+                    issues += (err.message ?: "Customer signature image is missing from this device.")
+                }
+            }
+            if (inv.signedPdfStoragePath.isNullOrBlank()) {
+                runCatching {
+                    validateLocalAttachment(
+                        localPath = inv.signedPdfLocalPath,
+                        label = "Signed invoice PDF",
+                        expectedMimeType = "application/pdf",
+                        expectedSha256 = inv.signedPdfSha256
+                    )
+                }.onFailure { err ->
+                    issues += (err.message ?: "Signed invoice PDF is missing from this device.")
+                }
+            }
+        }
+        return issues
+    }
+
+    fun hasAllRemoteAttachments(iwp: InvoiceWithPages): Boolean {
+        return runCatching { assertInvoiceReadyForMetadataSync(iwp) }.isSuccess
+    }
+
     fun computeFileSha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         FileInputStream(file).use { fis ->

@@ -112,6 +112,11 @@ object PrefKeys {
     const val MAP_STYLE_URL = "mapStyleUrl"
     const val ALLOW_OSM_FALLBACK = "allowOsmFallback"
 
+    // Transparent sync telemetry & onboarding progress (device-local, excluded from backups)
+    const val LAST_SYNCED_AT = "lastSyncedAt"
+    const val LAST_SYNC_ERROR = "lastSyncError"
+    const val ONBOARDING_DISMISSED = "onboardingDismissed"
+
     val BACKUP_KEYS = setOf(LANGUAGE, AREA, DAILY, SUMMARY_MINUTE, JOB_REMINDERS, ADVANCE)
 }
 
@@ -525,7 +530,10 @@ data class AppPreferences(
     val geocodingUrl: String = DEFAULT_GEOCODING_URL,
     val routingUrl: String = DEFAULT_ROUTING_URL,
     val mapStyleUrl: String = DEFAULT_MAP_STYLE_URL,
-    val allowOsmFallback: Boolean = true
+    val allowOsmFallback: Boolean = true,
+    val lastSyncedAt: Long? = null,
+    val lastSyncError: String? = null,
+    val onboardingDismissed: Boolean = false
 ) {
     companion object {
         const val DEFAULT_GEOCODING_URL = "https://nominatim.openstreetmap.org"
@@ -558,7 +566,10 @@ data class AppPreferences(
                 geocodingUrl = map[PrefKeys.GEOCODING_URL]?.trim() ?: DEFAULT_GEOCODING_URL,
                 routingUrl = map[PrefKeys.ROUTING_URL]?.trim() ?: DEFAULT_ROUTING_URL,
                 mapStyleUrl = map[PrefKeys.MAP_STYLE_URL]?.trim()?.ifBlank { DEFAULT_MAP_STYLE_URL } ?: DEFAULT_MAP_STYLE_URL,
-                allowOsmFallback = map[PrefKeys.ALLOW_OSM_FALLBACK]?.toBooleanStrictOrNull() ?: true
+                allowOsmFallback = map[PrefKeys.ALLOW_OSM_FALLBACK]?.toBooleanStrictOrNull() ?: true,
+                lastSyncedAt = map[PrefKeys.LAST_SYNCED_AT]?.toLongOrNull()?.takeIf { it > 0L },
+                lastSyncError = map[PrefKeys.LAST_SYNC_ERROR]?.ifBlank { null },
+                onboardingDismissed = map[PrefKeys.ONBOARDING_DISMISSED]?.toBooleanStrictOrNull() ?: false
             )
         }
     }

@@ -11,8 +11,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -21,20 +23,27 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Directions
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.LocalShipping
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -51,6 +60,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
+import com.delifar.app.cloud.CloudSyncStatus
 import com.delifar.app.cloud.CloudSyncUiState
 import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.HoursMode
@@ -203,66 +213,152 @@ fun RoleBadge(role: String) {
 }
 
 @Composable
+fun syncStatusLabel(
+    status: CloudSyncStatus,
+    pendingCount: Int = 0,
+    failedCount: Int = 0
+): String = when (status) {
+    CloudSyncStatus.OFFLINE_SAVING_LOCALLY -> lStr(R.string.sync_offline_mode)
+    CloudSyncStatus.CONFIGURED_NOT_SIGNED_IN -> lStr(R.string.sync_configured_not_signed_in)
+    CloudSyncStatus.AUTHENTICATION_REQUIRED -> lStr(R.string.sync_auth_required)
+    CloudSyncStatus.CONNECTING -> lStr(R.string.sync_connecting)
+    CloudSyncStatus.SYNCHRONIZING -> lStr(R.string.sync_syncing)
+    CloudSyncStatus.FULLY_SYNCHRONIZED -> lStr(R.string.sync_synced)
+    CloudSyncStatus.UPLOAD_PENDING -> lStr(R.string.sync_pending, pendingCount.coerceAtLeast(1))
+    CloudSyncStatus.SYNCHRONIZATION_FAILED -> lStr(R.string.sync_failed, failedCount.coerceAtLeast(1))
+    CloudSyncStatus.ACCESS_DENIED_OR_UNCONFIGURED -> lStr(R.string.sync_access_denied)
+}
+
+@Composable
+fun syncStatusColors(status: CloudSyncStatus): Pair<Color, Color> = when (status) {
+    CloudSyncStatus.FULLY_SYNCHRONIZED -> SuccessContainer to SuccessGreen
+    CloudSyncStatus.SYNCHRONIZING, CloudSyncStatus.CONNECTING -> InfoContainer to InfoBlue
+    CloudSyncStatus.UPLOAD_PENDING,
+    CloudSyncStatus.CONFIGURED_NOT_SIGNED_IN,
+    CloudSyncStatus.AUTHENTICATION_REQUIRED -> AmberContainer to Color(0xFF92400E)
+    CloudSyncStatus.SYNCHRONIZATION_FAILED,
+    CloudSyncStatus.ACCESS_DENIED_OR_UNCONFIGURED -> TerracottaContainer to TerracottaError
+    CloudSyncStatus.OFFLINE_SAVING_LOCALLY ->
+        MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
+}
+
+@Composable
 fun SyncStatusBanner(
+    status: CloudSyncStatus,
     syncState: CloudSyncUiState,
     pendingCount: Int,
     failedCount: Int,
     companyName: String?,
-    onTapSync: () -> Unit
+    lastSyncedAt: Long? = null,
+    zoneId: ZoneId = BusinessRules.LA_ZONE,
+    onTapSync: () -> Unit,
+    onTapOpenAccount: (() -> Unit)? = null
 ) {
-    val (bg, fg, icon, label) = when {
-        failedCount > 0 -> Quad(TerracottaContainer, TerracottaError, Icons.Default.CloudOff, lStr(R.string.sync_failed, failedCount))
-        syncState.isSyncing -> Quad(InfoContainer, InfoBlue, Icons.Default.CloudSync, lStr(R.string.sync_syncing))
-        pendingCount > 0 && syncState.firebaseConfigured -> Quad(AmberContainer, Color(0xFF92400E), Icons.Default.CloudUpload, lStr(R.string.sync_pending, pendingCount))
-        !syncState.firebaseConfigured -> Quad(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.onSurfaceVariant, Icons.Default.CloudOff, lStr(R.string.sync_offline_mode))
-        else -> Quad(SuccessContainer, SuccessGreen, Icons.Default.CloudDone, lStr(R.string.sync_synced))
+    val (bg, fg) = syncStatusColors(status)
+    val icon = when (status) {
+        CloudSyncStatus.OFFLINE_SAVING_LOCALLY -> Icons.Default.CloudOff
+        CloudSyncStatus.CONFIGURED_NOT_SIGNED_IN,
+        CloudSyncStatus.AUTHENTICATION_REQUIRED -> Icons.Default.Lock
+        CloudSyncStatus.CONNECTING,
+        CloudSyncStatus.SYNCHRONIZING -> Icons.Default.CloudSync
+        CloudSyncStatus.FULLY_SYNCHRONIZED -> Icons.Default.CloudDone
+        CloudSyncStatus.UPLOAD_PENDING -> Icons.Default.CloudUpload
+        CloudSyncStatus.SYNCHRONIZATION_FAILED,
+        CloudSyncStatus.ACCESS_DENIED_OR_UNCONFIGURED -> Icons.Default.ErrorOutline
     }
+    val label = syncStatusLabel(status, pendingCount, failedCount)
+    val needsSignIn = status == CloudSyncStatus.CONFIGURED_NOT_SIGNED_IN ||
+        status == CloudSyncStatus.AUTHENTICATION_REQUIRED
+    val actionClick = if (needsSignIn && onTapOpenAccount != null) onTapOpenAccount else onTapSync
+    val effectiveLastSync = syncState.lastSyncedAt ?: lastSyncedAt
 
     Surface(
         color = bg,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onTapSync)
+            .clickable(onClick = actionClick)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .defaultMinSize(minHeight = 40.dp)
                 .padding(horizontal = 14.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
                 Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = if (!companyName.isNullOrBlank()) "$companyName • $label" else label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = fg,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (!companyName.isNullOrBlank()) "$companyName • $label" else label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = fg,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (status == CloudSyncStatus.FULLY_SYNCHRONIZED && effectiveLastSync != null) {
+                        Text(
+                            text = lStr(R.string.sync_last_synced, BusinessRules.formatTimestamp(effectiveLastSync, zoneId)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = fg.copy(alpha = 0.85f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else if ((status == CloudSyncStatus.SYNCHRONIZATION_FAILED ||
+                            status == CloudSyncStatus.ACCESS_DENIED_OR_UNCONFIGURED) &&
+                        !syncState.lastError.isNullOrBlank()
+                    ) {
+                        Text(
+                            text = syncState.lastError,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = fg.copy(alpha = 0.9f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
             }
-            if (failedCount > 0 || pendingCount > 0) {
-                Text(
-                    text = lStr(R.string.sync_now),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = fg,
-                    fontWeight = FontWeight.Bold
-                )
+            Spacer(Modifier.width(8.dp))
+            when {
+                needsSignIn && onTapOpenAccount != null -> {
+                    Text(
+                        text = lStr(R.string.sign_in),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = fg,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                status == CloudSyncStatus.SYNCHRONIZATION_FAILED ||
+                    status == CloudSyncStatus.UPLOAD_PENDING ||
+                    status == CloudSyncStatus.ACCESS_DENIED_OR_UNCONFIGURED -> {
+                    Text(
+                        text = lStr(R.string.sync_now),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = fg,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
     }
 }
-
-private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
 @Composable
 fun JobCard(
     row: JobListRow,
     zoneId: ZoneId = BusinessRules.LA_ZONE,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    receivingHoursToday: String? = null,
+    onQuickNavigate: (() -> Unit)? = null,
+    onQuickCall: (() -> Unit)? = null,
+    onQuickAdvanceStatus: (() -> Unit)? = null,
+    onQuickInvoice: (() -> Unit)? = null
 ) {
     val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
     val overdue = BusinessRules.isOverdue(row.job.date, row.job.status, today)
@@ -416,6 +512,84 @@ fun JobCard(
                                 style = MaterialTheme.typography.labelMedium,
                                 color = if (allSigned) SuccessGreen else AmberAccent,
                                 fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (!receivingHoursToday.isNullOrBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${lStr(R.string.receiving_hours)}: $receivingHoursToday",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // One-handed driver quick actions (only shown when callbacks provided and job is active)
+            val isActive = row.job.status in JobStatus.ACTIVE
+            val hasQuickActions = isActive && (onQuickNavigate != null || onQuickCall != null || onQuickAdvanceStatus != null || onQuickInvoice != null)
+            if (hasQuickActions) {
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (onQuickNavigate != null) {
+                        OutlinedButton(
+                            onClick = onQuickNavigate,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 44.dp)
+                        ) {
+                            Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(lStr(R.string.directions), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    if (onQuickCall != null) {
+                        OutlinedButton(
+                            onClick = onQuickCall,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                        ) {
+                            Icon(Icons.Default.Call, contentDescription = lStr(R.string.call_store), modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    if (onQuickInvoice != null) {
+                        OutlinedButton(
+                            onClick = onQuickInvoice,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                        ) {
+                            Icon(Icons.Default.Description, contentDescription = lStr(R.string.quick_invoice_action), modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    if (onQuickAdvanceStatus != null) {
+                        val isInProgress = row.job.status == JobStatus.PROGRESS
+                        OutlinedButton(
+                            onClick = onQuickAdvanceStatus,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 44.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isInProgress) Icons.Default.CheckCircle else Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                tint = if (isInProgress) SuccessGreen else MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = if (isInProgress) lStr(R.string.action_complete) else lStr(R.string.action_start),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }

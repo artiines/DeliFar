@@ -72,7 +72,10 @@ import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.EncryptedArchiveBackupManager
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.RoleBadge
+import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.lStr
+import com.delifar.app.ui.components.syncStatusColors
+import com.delifar.app.ui.components.syncStatusLabel
 import com.delifar.app.ui.theme.AmberAccent
 import com.delifar.app.ui.theme.SuccessGreen
 import com.delifar.app.ui.theme.TerracottaError
@@ -89,8 +92,11 @@ fun SettingsScreen(
     val context = LocalContext.current
     val prefs by viewModel.preferences.collectAsState()
     val company by viewModel.activeCompany.collectAsState()
+    val syncState by viewModel.syncState.collectAsState()
+    val resolvedSyncStatus by viewModel.resolvedSyncStatus.collectAsState()
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsState()
     val failedSyncCount by viewModel.failedSyncCount.collectAsState()
+    val latestSyncError by viewModel.latestSyncError.collectAsState()
     val importPreview by viewModel.importPreview.collectAsState()
     val pendingEncryptedFile by viewModel.pendingEncryptedArchiveFile.collectAsState()
     val archiveImportPreview by viewModel.archiveImportPreview.collectAsState()
@@ -169,8 +175,11 @@ fun SettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Cloud Account, Company & Sync
+            // Cloud Account, Company & Transparent Sync Diagnostics
             item {
+                val (syncBg, syncFg) = syncStatusColors(resolvedSyncStatus)
+                val lastSyncedTs = syncState.lastSyncedAt ?: prefs.lastSyncedAt
+                val activeError = syncState.lastError ?: latestSyncError ?: prefs.lastSyncError
                 SettingsCard(title = lStr(R.string.account_and_company)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -191,11 +200,50 @@ fun SettingsScreen(
                         RoleBadge(role = prefs.activeUserRole)
                     }
 
+                    HorizontalDivider()
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = lStr(R.string.sync_status_title),
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        StatusTag(
+                            text = syncStatusLabel(resolvedSyncStatus, pendingSyncCount, failedSyncCount),
+                            bg = syncBg,
+                            fg = syncFg
+                        )
+                    }
+
+                    Text(
+                        text = if (lastSyncedTs != null) {
+                            lStr(R.string.sync_last_synced, BusinessRules.formatTimestamp(lastSyncedTs, zoneId))
+                        } else {
+                            lStr(R.string.sync_never_synced)
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(
                         text = "Queue: $pendingSyncCount pending • $failedSyncCount failed",
                         style = MaterialTheme.typography.labelMedium,
+                        color = if (failedSyncCount > 0) TerracottaError else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Firebase config: ${if (FirebaseServices.isConfigured) "Bundled" else "Not bundled"} • Auth: ${if (FirebaseServices.isAuthenticated) "Signed in" else "Not signed in"} • App Check: ${if (FirebaseServices.appCheckInstalled) FirebaseServices.appCheckProviderName else "Inactive"}",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (!activeError.isNullOrBlank()) {
+                        Text(
+                            text = activeError,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TerracottaError
+                        )
+                    }
                     FirebaseServices.lastInitError?.let { initErr ->
                         Text(
                             text = initErr,
@@ -211,7 +259,7 @@ fun SettingsScreen(
                         ) {
                             Icon(Icons.Default.Business, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text(lStr(R.string.account_and_company))
+                            Text(lStr(R.string.account_and_company), maxLines = 1)
                         }
                         OutlinedButton(
                             onClick = onOpenTeam,
@@ -219,7 +267,7 @@ fun SettingsScreen(
                         ) {
                             Icon(Icons.Default.Groups, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text(lStr(R.string.team_management))
+                            Text(lStr(R.string.team_management), maxLines = 1)
                         }
                     }
 
@@ -230,14 +278,14 @@ fun SettingsScreen(
                         ) {
                             Icon(Icons.Default.CloudSync, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text(lStr(R.string.sync_now))
+                            Text(lStr(R.string.sync_now), maxLines = 1)
                         }
                         if (company != null && prefs.activeUserRole == EmployeeRole.OWNER) {
                             OutlinedButton(
                                 onClick = { viewModel.checkUnmigratedLocalData() },
                                 modifier = Modifier.weight(1f)
                             ) {
-                                Text(lStr(R.string.migrate_local_data))
+                                Text(lStr(R.string.migrate_local_data), maxLines = 1)
                             }
                         }
                     }

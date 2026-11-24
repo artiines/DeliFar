@@ -30,7 +30,7 @@ class OsmRoutesClient {
         routingBaseUrl: String,
         optimizeIntermediates: Boolean = true
     ): Result<ComputedRouteResult> = withContext(Dispatchers.IO) {
-        val validStops = stops.filter { it.isValid() }.take(25)
+        val validStops = stops.filter { it.isValid() }.take(200)
         if (validStops.size < 2) {
             return@withContext Result.failure(
                 IllegalArgumentException("At least 2 stores with confirmed coordinates are required for routing.")
@@ -39,7 +39,7 @@ class OsmRoutesClient {
 
         val trimmedBase = routingBaseUrl.trim().trimEnd('/')
         if (trimmedBase.isNotEmpty()) {
-            val remote = fetchOsrmRoute(validStops, trimmedBase, optimizeIntermediates)
+            val remote = fetchOsrmRoute(validStops.take(25), trimmedBase, optimizeIntermediates)
             if (remote.isSuccess) return@withContext remote
         }
 

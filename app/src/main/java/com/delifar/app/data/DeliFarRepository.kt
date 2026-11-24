@@ -72,6 +72,9 @@ class DeliFarRepository(
     fun observeFailedSyncCount(companyId: String): Flow<Int> =
         if (companyId.isBlank()) syncQueueDao.observeFailedCountByCompany("")
         else syncQueueDao.observeFailedCountByCompany(companyId)
+    fun observeLatestSyncError(companyId: String): Flow<String?> =
+        if (companyId.isBlank()) syncQueueDao.observeLatestErrorByCompany("")
+        else syncQueueDao.observeLatestErrorByCompany(companyId)
     fun observeLatestDraft(): Flow<DraftEntity?> = draftDao.observeLatestDraft()
 
     fun observePreferences(): Flow<AppPreferences> =
@@ -455,6 +458,209 @@ class DeliFarRepository(
         return Result.success(
             MigrationSummary(unmigratedStores.size, unmigratedJobs.size, unmigratedInvoices.size)
         )
+    }
+
+    suspend fun getOfflineOwnedCompanies(): List<CompanyEntity> =
+        companyDao.getCompaniesOwnedByPrefix("local_%")
+
+    suspend fun getCompaniesForUser(uid: String): List<CompanyEntity> =
+        if (uid.isBlank()) emptyList() else companyDao.getCompaniesForUser(uid)
+
+    /**
+     * Safely transfers ownership of a locally created offline company (ownerUid starting with "local_")
+     * to a newly authenticated Firebase user after explicit user confirmation.
+     *
+     * Strictly refuses to claim any company already owned by another real Firebase user so locally
+     * created company ownership is never silently assigned to the wrong authenticated account.
+     * Preserves all deterministic IDs to prevent duplicate companies or records during migration.
+     */
+    suspend fun claimLocalCompanyForAuthenticatedUser(
+        localCompanyId: String,
+        authUid: String,
+        authName: String,
+        authEmail: String
+    ): Result<CompanyEntity> {
+        val cleanAuthUid = authUid.trim()
+        if (cleanAuthUid.isBlank() || cleanAuthUid.startsWith("local_")) {
+            return Result.failure(IllegalArgumentException("Sign in with a cloud account before claiming a local company."))
+        }
+        val company = companyDao.getCompany(localCompanyId)
+            ?: return Result.failure(IllegalArgumentException("Local company not found."))
+        val oldOwnerUid = company.ownerUid
+        if (!oldOwnerUid.startsWith("local_")) {
+            return if (oldOwnerUid == cleanAuthUid) {
+                Result.success(company) // Already owned by this user (idempotent)
+            } else {
+                Result.failure(
+                    SecurityException("This company is already owned by another account and cannot be reassigned.")
+                )
+            }
+        }
+
+        val now = System.currentTimeMillis()
+        val cleanName = authName.trim().ifBlank { authEmail.substringBefore("@").ifBlank { "Owner" } }
+        val cleanEmail = authEmail.trim().lowercase()
+        val updatedCompany = company.copy(ownerUid = cleanAuthUid, modified = now)
+
+        db.withTransaction {
+            val oldEmp = employeeDao.getByUidInCompany(oldOwnerUid, localCompanyId)
+            val newEmp = EmployeeEntity(
+                uid = cleanAuthUid,
+                companyId = localCompanyId,
+                displayName = cleanName,
+                email = cleanEmail,
+                phone = oldEmp?.phone.orEmpty(),
+                role = EmployeeRole.OWNER,
+                active = true,
+                fcmToken = oldEmp?.fcmToken.orEmpty(),
+                invitedByUid = cleanAuthUid,
+                joinedAt = oldEmp?.joinedAt ?: now,
+                lastActiveAt = now
+            )
+            companyDao.upsert(updatedCompany)
+            employeeDao.upsert(newEmp)
+            employeeDao.deleteByUidInCompany(oldOwnerUid, localCompanyId)
+
+            // Reassign local author references created under the temporary local_* UID without duplicating rows
+            storeDao.reassignUpdatedByUid(localCompanyId, oldOwnerUid, cleanAuthUid)
+            jobDao.reassignUpdatedByUid(localCompanyId, oldOwnerUid, cleanAuthUid)
+            jobDao.reassignAssignedDriverUid(localCompanyId, oldOwnerUid, cleanAuthUid, cleanName)
+            invoiceDao.reassignCreatedByUid(localCompanyId, oldOwnerUid, cleanAuthUid)
+            invoiceDao.reassignAssignedDriverUid(localCompanyId, oldOwnerUid, cleanAuthUid)
+
+            prefDao.upsertAll(
+                listOf(
+                    PreferenceEntity(PrefKeys.ACTIVE_COMPANY_ID, localCompanyId),
+                    PreferenceEntity(PrefKeys.ACTIVE_USER_UID, cleanAuthUid),
+                    PreferenceEntity(PrefKeys.ACTIVE_USER_NAME, cleanName),
+                    PreferenceEntity(PrefKeys.ACTIVE_USER_EMAIL, cleanEmail),
+                    PreferenceEntity(PrefKeys.ACTIVE_USER_ROLE, EmployeeRole.OWNER),
+                    PreferenceEntity(PrefKeys.COMPANY_TIMEZONE, updatedCompany.timezone),
+                    PreferenceEntity(PrefKeys.AREA, updatedCompany.defaultArea)
+                )
+            )
+
+            // Queue company, owner employee, and all existing company records once (idempotent via findExistingInCompany)
+            enqueueSyncInternal(localCompanyId, "company", localCompanyId, "upsert")
+            enqueueSyncInternal(localCompanyId, "employee", cleanAuthUid, "upsert")
+            storeDao.getStoresWithHoursByCompany(localCompanyId).forEach {
+                enqueueSyncInternal(localCompanyId, "store", it.store.id, "upsert")
+            }
+            jobDao.getJobsWithItemsByCompany(localCompanyId).forEach {
+                enqueueSyncInternal(localCompanyId, "job", it.job.id, "upsert")
+            }
+            invoiceDao.getInvoicesWithPagesByCompany(localCompanyId).forEach { iwp ->
+                enqueueSyncInternal(localCompanyId, "invoice_file", iwp.invoice.id, "upload_file")
+                enqueueSyncInternal(localCompanyId, "invoice", iwp.invoice.id, "upsert")
+            }
+
+            recordAuditInternal(
+                companyId = localCompanyId,
+                actorUid = cleanAuthUid,
+                actorName = cleanName,
+                actorRole = EmployeeRole.OWNER,
+                action = "OFFLINE_COMPANY_CLAIMED",
+                targetType = "company",
+                targetId = localCompanyId,
+                summary = "Transferred local offline company '${updatedCompany.name}' to authenticated owner $cleanEmail"
+            )
+        }
+        return Result.success(updatedCompany)
+    }
+
+    /**
+     * Switches the active company strictly after verifying the user is an active member of that company.
+     */
+    suspend fun switchActiveCompany(companyId: String, userUid: String): Result<CompanyEntity> {
+        val company = companyDao.getCompany(companyId)
+            ?: return Result.failure(IllegalArgumentException("Company not found."))
+        val member = employeeDao.getByUidInCompany(userUid, companyId)
+        val isVerifiedOwner = company.ownerUid == userUid
+        if (member == null && !isVerifiedOwner) {
+            return Result.failure(SecurityException("You do not have access to this company."))
+        }
+        if (member != null && !member.active && !isVerifiedOwner) {
+            return Result.failure(SecurityException("Your account is deactivated in this company."))
+        }
+        val targetRole = if (isVerifiedOwner) EmployeeRole.OWNER else member!!.role
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            if (isVerifiedOwner && member == null) {
+                val existingProfile = employeeDao.getByUid(userUid)
+                val prefs = getPreferences()
+                employeeDao.upsert(
+                    EmployeeEntity(
+                        uid = userUid,
+                        companyId = company.id,
+                        displayName = existingProfile?.displayName?.ifBlank { prefs.activeUserName }
+                            ?: prefs.activeUserName.ifBlank { "Owner" },
+                        email = existingProfile?.email?.ifBlank { prefs.activeUserEmail }
+                            ?: prefs.activeUserEmail,
+                        phone = existingProfile?.phone.orEmpty(),
+                        role = EmployeeRole.OWNER,
+                        active = true,
+                        fcmToken = existingProfile?.fcmToken.orEmpty(),
+                        invitedByUid = userUid,
+                        joinedAt = existingProfile?.joinedAt ?: now,
+                        lastActiveAt = now
+                    )
+                )
+            }
+            prefDao.upsertAll(
+                listOf(
+                    PreferenceEntity(PrefKeys.ACTIVE_COMPANY_ID, company.id),
+                    PreferenceEntity(PrefKeys.ACTIVE_USER_ROLE, targetRole),
+                    PreferenceEntity(PrefKeys.COMPANY_TIMEZONE, company.timezone),
+                    PreferenceEntity(PrefKeys.AREA, company.defaultArea),
+                    PreferenceEntity(PrefKeys.LAST_SYNC_ERROR, "")
+                )
+            )
+        }
+        return Result.success(company)
+    }
+
+    /**
+     * Safely validates an invoice's local attachments and re-enqueues it for upload.
+     * Preserves signed state, timestamps, and version history; never marks synchronized prematurely.
+     */
+    suspend fun retryInvoiceUpload(invoiceId: String, companyId: String): Result<Unit> {
+        val iwp = getInvoiceWithPages(invoiceId, companyId.ifBlank { null })
+            ?: return Result.failure(IllegalArgumentException("Invoice not found in active company."))
+        val inv = iwp.invoice
+        if (inv.companyId.isBlank()) {
+            return Result.failure(IllegalStateException("Register or join a company before uploading invoices to the cloud."))
+        }
+        val issues = com.delifar.app.cloud.InvoiceSyncValidator.inspectLocalAttachmentIssues(iwp)
+        if (issues.isNotEmpty()) {
+            val detail = issues.joinToString(" ")
+            invoiceDao.updateSyncAndStatus(
+                invoiceId = inv.id,
+                syncState = SyncState.FAILED,
+                status = InvoiceStatus.UPLOAD_FAILED,
+                serverTs = inv.serverUpdatedAt,
+                signedServerTs = inv.signedServerAt,
+                error = detail
+            )
+            return Result.failure(IllegalStateException(detail))
+        }
+
+        val nextStatus = if (inv.status == InvoiceStatus.VOIDED) InvoiceStatus.VOIDED else InvoiceStatus.PENDING_UPLOAD
+        db.withTransaction {
+            invoiceDao.updateSyncAndStatus(
+                invoiceId = inv.id,
+                syncState = SyncState.PENDING,
+                status = nextStatus,
+                serverTs = inv.serverUpdatedAt,
+                signedServerTs = inv.signedServerAt,
+                error = null
+            )
+            syncQueueDao.resetFailedForEntity(inv.companyId, inv.id)
+            if (!com.delifar.app.cloud.InvoiceSyncValidator.hasAllRemoteAttachments(iwp)) {
+                enqueueSyncInternal(inv.companyId, "invoice_file", inv.id, "upload_file")
+            }
+            enqueueSyncInternal(inv.companyId, "invoice", inv.id, "upsert")
+        }
+        return Result.success(Unit)
     }
 
     // --- Stores ---

@@ -1,5 +1,10 @@
 package com.delifar.app
 
+import com.delifar.app.cloud.BackendHealth
+import com.delifar.app.cloud.CloudSyncStatus
+import com.delifar.app.cloud.CloudSyncUiState
+import com.delifar.app.cloud.FirebaseServices
+import com.delifar.app.cloud.SyncStatusResolver
 import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.HoursMode
 import com.delifar.app.data.JobStatus
@@ -217,5 +222,191 @@ class DeliFarUnitTests {
             routingBaseUrl = ""
         )
         assertTrue(invalid.isFailure)
+    }
+
+    @Test
+    fun syncStatusResolver_accuratelyDistinguishesAllNineStatesAndNeverFakesSynced() {
+        // 1. Offline — saving locally (Firebase config not bundled)
+        assertEquals(
+            CloudSyncStatus.OFFLINE_SAVING_LOCALLY,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(firebaseConfigured = false, isAuthenticated = false, isOnline = true),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = "cmp_1"
+            )
+        )
+
+        // 2. Firebase configured but not signed in (empty queue MUST NOT show FULLY_SYNCHRONIZED!)
+        assertEquals(
+            CloudSyncStatus.CONFIGURED_NOT_SIGNED_IN,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = false,
+                    isOnline = true,
+                    backendHealth = BackendHealth.NOT_SIGNED_IN
+                ),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = ""
+            )
+        )
+
+        // 3. Authentication required (company or pending items exist while not signed in)
+        assertEquals(
+            CloudSyncStatus.AUTHENTICATION_REQUIRED,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = false,
+                    isOnline = true,
+                    backendHealth = BackendHealth.NOT_SIGNED_IN
+                ),
+                pendingCount = 2,
+                failedCount = 0,
+                activeCompanyId = "cmp_1"
+            )
+        )
+
+        // 4. Connecting
+        assertEquals(
+            CloudSyncStatus.CONNECTING,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(firebaseConfigured = true, isAuthenticated = true, isConnecting = true),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = "cmp_1"
+            )
+        )
+
+        // 5. Synchronizing
+        assertEquals(
+            CloudSyncStatus.SYNCHRONIZING,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(firebaseConfigured = true, isAuthenticated = true, isSyncing = true),
+                pendingCount = 1,
+                failedCount = 0,
+                activeCompanyId = "cmp_1"
+            )
+        )
+
+        // 6. Access denied or backend not configured
+        assertEquals(
+            CloudSyncStatus.ACCESS_DENIED_OR_UNCONFIGURED,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = true,
+                    isOnline = true,
+                    backendHealth = BackendHealth.ACCESS_DENIED
+                ),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = "cmp_1"
+            )
+        )
+
+        // 7. Synchronization failed (failed count > 0 OR persisted error even if pending == 0)
+        assertEquals(
+            CloudSyncStatus.SYNCHRONIZATION_FAILED,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = true,
+                    isOnline = true,
+                    backendHealth = BackendHealth.REACHABLE,
+                    lastError = "Upload failed"
+                ),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = "cmp_1"
+            )
+        )
+
+        // 8. Upload pending
+        assertEquals(
+            CloudSyncStatus.UPLOAD_PENDING,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = true,
+                    isOnline = true,
+                    backendHealth = BackendHealth.REACHABLE
+                ),
+                pendingCount = 3,
+                failedCount = 0,
+                activeCompanyId = "cmp_1"
+            )
+        )
+
+        // 9. Empty queue WITHOUT verified lastSyncedAt MUST NOT claim FULLY_SYNCHRONIZED
+        assertEquals(
+            CloudSyncStatus.CONNECTING,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = true,
+                    isOnline = true,
+                    backendHealth = BackendHealth.REACHABLE,
+                    lastSyncedAt = null
+                ),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = "cmp_1",
+                persistedLastSyncedAt = null
+            )
+        )
+
+        // 10. Fully synchronized ONLY when configured, authenticated, online, reachable, 0 pending/failed, AND verified timestamp
+        assertEquals(
+            CloudSyncStatus.FULLY_SYNCHRONIZED,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = true,
+                    isOnline = true,
+                    backendHealth = BackendHealth.REACHABLE,
+                    lastSyncedAt = 1_750_000_000_000L
+                ),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = "cmp_1"
+            )
+        )
+    }
+
+    @Test
+    fun firebaseErrorClassification_distinguishesPermissionOfflineAndMissingBackend() {
+        assertEquals(
+            BackendHealth.ACCESS_DENIED,
+            FirebaseServices.classifyBackendError(RuntimeException("PERMISSION_DENIED: Missing or insufficient permissions")).health
+        )
+        assertEquals(
+            BackendHealth.BACKEND_NOT_CONFIGURED,
+            FirebaseServices.classifyBackendError(RuntimeException("database (default) does not exist for project")).health
+        )
+        assertEquals(
+            BackendHealth.OFFLINE,
+            FirebaseServices.classifyBackendError(RuntimeException("Failed to get document because the client is offline")).health
+        )
+        assertEquals(
+            BackendHealth.NOT_SIGNED_IN,
+            FirebaseServices.classifyBackendError(RuntimeException("UNAUTHENTICATED")).health
+        )
+    }
+
+    @Test
+    fun offlineRouting_handlesLargeFleetOfStoresQuicklyAndDeterministically() = runTest {
+        val client = OsmRoutesClient()
+        val stops = (0 until 120).map { i ->
+            GeoPoint(34.05 + (i % 15) * 0.01, -118.25 - (i / 15) * 0.01)
+        }
+        val res = client.computeRoute(stops, routingBaseUrl = "", optimizeIntermediates = true)
+        assertTrue(res.isSuccess)
+        val route = res.getOrThrow()
+        assertFalse(route.isStreetRoute)
+        assertEquals(120, route.optimizedStopIndices.size)
+        assertEquals(120, route.optimizedStopIndices.toSet().size)
     }
 }
