@@ -97,6 +97,7 @@ fun SettingsScreen(
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsState()
     val failedSyncCount by viewModel.failedSyncCount.collectAsState()
     val latestSyncError by viewModel.latestSyncError.collectAsState()
+    val failedSyncItems by viewModel.failedSyncItems.collectAsState()
     val importPreview by viewModel.importPreview.collectAsState()
     val pendingEncryptedFile by viewModel.pendingEncryptedArchiveFile.collectAsState()
     val archiveImportPreview by viewModel.archiveImportPreview.collectAsState()
@@ -243,6 +244,49 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = TerracottaError
                         )
+                    }
+                    if (failedSyncItems.isNotEmpty()) {
+                        Card(
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                            ),
+                            border = BorderStroke(1.dp, TerracottaError.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Failed Sync Queue Details (${failedSyncItems.size})",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = TerracottaError
+                                )
+                                failedSyncItems.forEachIndexed { idx, failedItem ->
+                                    if (idx > 0) {
+                                        HorizontalDivider(color = TerracottaError.copy(alpha = 0.25f))
+                                    }
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "Entity: ${failedItem.entityType} • Operation: ${failedItem.operation} • Attempts: ${failedItem.retryCount}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "ID: ${failedItem.entityId}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = "Error: ${failedItem.lastError?.ifBlank { null } ?: "Unknown sync error"}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = TerracottaError
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                     FirebaseServices.lastInitError?.let { initErr ->
                         Text(

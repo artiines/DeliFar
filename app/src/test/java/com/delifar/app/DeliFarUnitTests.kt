@@ -1,10 +1,15 @@
 package com.delifar.app
 
+import com.delifar.app.cloud.AuditRemoteGateway
+import com.delifar.app.cloud.AuditUploadResolution
 import com.delifar.app.cloud.BackendHealth
 import com.delifar.app.cloud.CloudSyncStatus
 import com.delifar.app.cloud.CloudSyncUiState
 import com.delifar.app.cloud.FirebaseServices
+import com.delifar.app.cloud.IdempotentAuditUploader
+import com.delifar.app.cloud.RemoteAuditDocument
 import com.delifar.app.cloud.SyncStatusResolver
+import com.delifar.app.data.AuditLogEntity
 import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.HoursMode
 import com.delifar.app.data.JobStatus
@@ -408,5 +413,121 @@ class DeliFarUnitTests {
         assertFalse(route.isStreetRoute)
         assertEquals(120, route.optimizedStopIndices.size)
         assertEquals(120, route.optimizedStopIndices.toSet().size)
+    }
+
+    @Test
+    fun idempotentAuditUploader_handlesCreateDuplicateRetryTamperingAndGenuinePermissionDenied() = runTest {
+        val entry = AuditLogEntity(
+            id = "audit_company_reg_1",
+            companyId = "cmp_farster",
+            actorUid = "uid_owner_1",
+            actorName = "Owner",
+            actorRole = EmployeeRole.OWNER,
+            action = "COMPANY_REGISTERED",
+            targetType = "company",
+            targetId = "cmp_farster",
+            summary = "Registered company 'FARSTER LLC' (America/Los_Angeles)",
+            createdAt = 1_750_000_000_000L
+        )
+        val serverStore = mutableMapOf<String, RemoteAuditDocument>()
+        var createCalls = 0
+        var fetchCalls = 0
+        var denyAllCreates = false
+
+        val strictAppendOnlyGateway = object : AuditRemoteGateway {
+            override suspend fun createAudit(companyId: String, logId: String, payload: Map<String, Any?>) {
+                createCalls++
+                if (denyAllCreates || serverStore.containsKey(logId)) {
+                    // Mirrors Firestore append-only rule: allow update, delete: if false
+                    throw IllegalStateException("PERMISSION_DENIED: Missing or insufficient permissions.")
+                }
+                serverStore[logId] = RemoteAuditDocument(
+                    documentId = logId,
+                    id = payload["id"] as String,
+                    companyId = payload["companyId"] as String,
+                    actorUid = payload["actorUid"] as String,
+                    actorName = payload["actorName"] as String,
+                    actorRole = payload["actorRole"] as String,
+                    action = payload["action"] as String,
+                    targetType = payload["targetType"] as String,
+                    targetId = payload["targetId"] as String,
+                    summary = payload["summary"] as String,
+                    createdAt = payload["createdAt"] as Long,
+                    serverTimestampMillis = 1_750_000_123_456L
+                )
+            }
+
+            override suspend fun fetchAuditFromServer(companyId: String, logId: String): RemoteAuditDocument? {
+                fetchCalls++
+                return serverStore[logId]
+            }
+        }
+
+        // 1. First create succeeds normally
+        val created = IdempotentAuditUploader.uploadIdempotently(
+            entry = entry,
+            actorUidToSend = entry.actorUid,
+            preferVerifyFirst = false,
+            gateway = strictAppendOnlyGateway,
+            serverTimestampValue = "SERVER_TS"
+        )
+        assertEquals(AuditUploadResolution.CREATED, created.resolution)
+        assertEquals(1, createCalls)
+        assertEquals(0, fetchCalls)
+
+        // 2. Duplicate upload (e.g. after dropped network ack before queue delete) hits PERMISSION_DENIED,
+        // verifies matching remote immutable fields, and succeeds idempotently
+        val dupAfterAckDrop = IdempotentAuditUploader.uploadIdempotently(
+            entry = entry,
+            actorUidToSend = entry.actorUid,
+            preferVerifyFirst = false,
+            gateway = strictAppendOnlyGateway,
+            serverTimestampValue = "SERVER_TS"
+        )
+        assertEquals(AuditUploadResolution.ALREADY_EXISTS_VERIFIED, dupAfterAckDrop.resolution)
+        assertEquals(1_750_000_123_456L, dupAfterAckDrop.serverTimestampMillis)
+        assertEquals(2, createCalls)
+        assertEquals(1, fetchCalls)
+
+        // 3. Explicit retry (preferVerifyFirst = true) verifies server doc directly without a doomed write
+        val explicitRetry = IdempotentAuditUploader.uploadIdempotently(
+            entry = entry,
+            actorUidToSend = entry.actorUid,
+            preferVerifyFirst = true,
+            gateway = strictAppendOnlyGateway,
+            serverTimestampValue = "SERVER_TS"
+        )
+        assertEquals(AuditUploadResolution.ALREADY_EXISTS_VERIFIED, explicitRetry.resolution)
+        assertEquals(2, createCalls) // No extra doomed create call
+        assertEquals(2, fetchCalls)
+
+        // 4. Remote document with tampered immutable field MUST be rejected (never falsely treated as success)
+        serverStore[entry.id] = serverStore[entry.id]!!.copy(summary = "TAMPERED SUMMARY")
+        val tamperedResult = runCatching {
+            IdempotentAuditUploader.uploadIdempotently(
+                entry = entry,
+                actorUidToSend = entry.actorUid,
+                preferVerifyFirst = true,
+                gateway = strictAppendOnlyGateway,
+                serverTimestampValue = "SERVER_TS"
+            )
+        }
+        assertTrue(tamperedResult.isFailure)
+        assertTrue(tamperedResult.exceptionOrNull()!!.message!!.contains("mismatched", ignoreCase = true))
+
+        // 5. Genuine PERMISSION_DENIED when document does NOT exist on server MUST fail and preserve error
+        serverStore.clear()
+        denyAllCreates = true
+        val genuineDenied = runCatching {
+            IdempotentAuditUploader.uploadIdempotently(
+                entry = entry,
+                actorUidToSend = entry.actorUid,
+                preferVerifyFirst = true,
+                gateway = strictAppendOnlyGateway,
+                serverTimestampValue = "SERVER_TS"
+            )
+        }
+        assertTrue(genuineDenied.isFailure)
+        assertTrue(genuineDenied.exceptionOrNull()!!.message!!.contains("PERMISSION_DENIED", ignoreCase = true))
     }
 }

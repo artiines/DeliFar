@@ -75,6 +75,12 @@ class DeliFarRepository(
     fun observeLatestSyncError(companyId: String): Flow<String?> =
         if (companyId.isBlank()) syncQueueDao.observeLatestErrorByCompany("")
         else syncQueueDao.observeLatestErrorByCompany(companyId)
+    fun observeFailedSyncItems(companyId: String): Flow<List<SyncQueueEntity>> =
+        if (companyId.isBlank()) syncQueueDao.observeFailedItemsByCompany("")
+        else syncQueueDao.observeFailedItemsByCompany(companyId)
+    suspend fun getFailedSyncItems(companyId: String): List<SyncQueueEntity> =
+        if (companyId.isBlank()) emptyList()
+        else syncQueueDao.getFailedItemsByCompany(companyId)
     fun observeLatestDraft(): Flow<DraftEntity?> = draftDao.observeLatestDraft()
 
     fun observePreferences(): Flow<AppPreferences> =

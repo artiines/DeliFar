@@ -200,7 +200,7 @@ service cloud.firestore {
         && request.resource.data.timezone is string
         && request.resource.data.timezone.size() >= 1
         && request.resource.data.timezone.size() <= 64
-        && request.resource.data.defaultArea in ['la', 'sac'];
+        && request.resource.data.defaultArea in ['la', 'sac', 'LA', 'SAC'];
 
       allow update: if isOwner(companyId)
         && request.resource.data.id == companyId
@@ -209,7 +209,7 @@ service cloud.firestore {
         && request.resource.data.name.size() >= 1
         && request.resource.data.name.size() <= 120
         && request.resource.data.timezone is string
-        && request.resource.data.defaultArea in ['LA', 'SAC'];
+        && request.resource.data.defaultArea in ['la', 'sac', 'LA', 'SAC'];
 
       allow delete: if false;
 

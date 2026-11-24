@@ -7,11 +7,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
+import com.delifar.app.cloud.AuditRemoteGateway
 import com.delifar.app.cloud.CloudSyncManager
 import com.delifar.app.cloud.FirebaseServices
+import com.delifar.app.cloud.IdempotentAuditUploader
 import com.delifar.app.cloud.InvoiceSyncValidator
 import com.delifar.app.cloud.InvoiceUploadErrorCode
 import com.delifar.app.cloud.InvoiceUploadException
+import com.delifar.app.cloud.RemoteAuditDocument
 import com.delifar.app.cloud.SyncFlushOutcome
 import com.delifar.app.data.DeliFarDatabase
 import com.delifar.app.data.DeliFarRepository
@@ -36,8 +39,13 @@ import com.delifar.app.network.AddressGeocoderService
 import com.delifar.app.network.GeoValidation
 import com.delifar.app.network.GeocodeSource
 import com.delifar.app.reminders.ReminderScheduler
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertNull
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipEntry
@@ -1439,6 +1447,236 @@ class DeliFarDatabaseAndWorkflowTests {
         assertEquals(JobIssue.PARTIAL, reported.issue)
         assertEquals(JobStatus.COMPLETED, reported.status)
         assertEquals("16", db.jobDao().getJobWithItems(job.id)!!.items.first().actual)
+    }
+
+    @Test
+    fun concurrentSyncWorkers_neverProcessSameQueueItemTwiceOrTriggerDuplicateAuditPermissionDenied() = runTest {
+        val company = repo.registerCompany(
+            companyName = "FARSTER LLC",
+            ownerUid = "uid_farster_owner",
+            ownerName = "Owner",
+            ownerEmail = "owner@farster.com",
+            timezone = "America/Los_Angeles",
+            defaultArea = SearchArea.LA
+        ).getOrThrow()
+
+        // Confirm exact 3 queued items created by company registration: company, employee, audit
+        val initialDue = db.syncQueueDao().getDueItemsForCompany(company.id, System.currentTimeMillis() + 1000L)
+        assertEquals(setOf("company", "employee", "audit"), initialDue.map { it.entityType }.toSet())
+
+        val uploadCountsByKey = ConcurrentHashMap<String, AtomicInteger>()
+        val remoteAudits = ConcurrentHashMap<String, RemoteAuditDocument>()
+        val activeUploads = AtomicInteger(0)
+        val maxConcurrentUploads = AtomicInteger(0)
+
+        val appendOnlyAuditGateway = object : AuditRemoteGateway {
+            override suspend fun createAudit(companyId: String, logId: String, payload: Map<String, Any?>) {
+                if (remoteAudits.containsKey(logId)) {
+                    throw IllegalStateException("PERMISSION_DENIED: Audit log updates are forbidden.")
+                }
+                remoteAudits[logId] = RemoteAuditDocument(
+                    documentId = logId,
+                    id = payload["id"] as String,
+                    companyId = payload["companyId"] as String,
+                    actorUid = payload["actorUid"] as String,
+                    actorName = payload["actorName"] as String,
+                    actorRole = payload["actorRole"] as String,
+                    action = payload["action"] as String,
+                    targetType = payload["targetType"] as String,
+                    targetId = payload["targetId"] as String,
+                    summary = payload["summary"] as String,
+                    createdAt = payload["createdAt"] as Long,
+                    serverTimestampMillis = 1_750_001_000_000L
+                )
+            }
+
+            override suspend fun fetchAuditFromServer(companyId: String, logId: String): RemoteAuditDocument? =
+                remoteAudits[logId]
+        }
+
+        // Two separate CloudSyncManager instances simulate DeliFarViewModel + SyncWorker running concurrently
+        val foregroundSync = CloudSyncManager(context, db, repo)
+        val backgroundWorkerSync = CloudSyncManager(context, db, repo)
+
+        suspend fun simulatedUpload(item: com.delifar.app.data.SyncQueueEntity, wasRetry: Boolean) {
+            val concurrent = activeUploads.incrementAndGet()
+            maxConcurrentUploads.accumulateAndGet(concurrent, ::maxOf)
+            try {
+                // Deliberately suspend to widen race window if mutex were missing
+                delay(40)
+                val key = "${item.entityType}:${item.entityId}"
+                uploadCountsByKey.computeIfAbsent(key) { AtomicInteger(0) }.incrementAndGet()
+                if (item.entityType == "audit") {
+                    val entry = db.auditLogDao().getById(item.entityId)!!
+                    val res = IdempotentAuditUploader.uploadIdempotently(
+                        entry = entry,
+                        actorUidToSend = "uid_farster_owner",
+                        preferVerifyFirst = wasRetry,
+                        gateway = appendOnlyAuditGateway,
+                        serverTimestampValue = "SERVER_TS"
+                    )
+                    db.auditLogDao().markSynced(entry.id, SyncState.SYNCED, res.serverTimestampMillis)
+                }
+            } finally {
+                activeUploads.decrementAndGet()
+            }
+        }
+
+        val outcomes = listOf(
+            async { foregroundSync.executeLockedQueueFlush(company.id, retryFailedFirst = true, uploadItem = ::simulatedUpload) },
+            async { backgroundWorkerSync.executeLockedQueueFlush(company.id, retryFailedFirst = false, uploadItem = ::simulatedUpload) }
+        ).awaitAll()
+
+        assertEquals(listOf(SyncFlushOutcome.SUCCEEDED, SyncFlushOutcome.SUCCEEDED), outcomes)
+        assertEquals("Workers must never overlap on queue processing", 1, maxConcurrentUploads.get())
+        assertEquals(3, uploadCountsByKey.size)
+        uploadCountsByKey.forEach { (key, count) ->
+            assertEquals("Queue item $key must be uploaded exactly once", 1, count.get())
+        }
+        assertEquals(0, db.syncQueueDao().getPendingCountNow(company.id))
+        assertEquals(0, db.syncQueueDao().getFailedCountNow(company.id))
+
+        // Verify local company and COMPANY_REGISTERED audit record are preserved & marked synced
+        assertEquals("FARSTER LLC", repo.getCompany(company.id)?.name)
+        val logs = repo.observeAuditLogs(company.id).first()
+        assertEquals(1, logs.size)
+        assertEquals("COMPANY_REGISTERED", logs.first().action)
+        assertEquals(SyncState.SYNCED, logs.first().syncState)
+    }
+
+    @Test
+    fun duplicateAuditUploadAfterPartialSuccess_recoversIdempotentlyAndDiagnosticsExposeExactFailedItem() = runTest {
+        val company = repo.registerCompany(
+            companyName = "FARSTER LLC",
+            ownerUid = "uid_farster_owner",
+            ownerName = "Owner",
+            ownerEmail = "owner@farster.com",
+            timezone = "America/Los_Angeles",
+            defaultArea = SearchArea.LA
+        ).getOrThrow()
+
+        // Simulate exact current phone state:
+        // company + employee already synced & removed from queue;
+        // COMPANY_REGISTERED audit doc ALREADY exists in Firestore, while local sync_queue still has 1 failed audit item with PERMISSION_DENIED.
+        val queueItems = db.syncQueueDao().getDueItemsForCompany(company.id, System.currentTimeMillis() + 1000L)
+        val auditQueueItem = queueItems.first { it.entityType == "audit" }
+        queueItems.filter { it.entityType != "audit" }.forEach { db.syncQueueDao().delete(it.id) }
+
+        val auditEntry = db.auditLogDao().getById(auditQueueItem.entityId)!!
+        assertEquals("COMPANY_REGISTERED", auditEntry.action)
+
+        db.syncQueueDao().upsert(
+            auditQueueItem.copy(
+                retryCount = 2,
+                status = SyncState.FAILED,
+                lastError = "PERMISSION_DENIED: Missing or insufficient permissions.",
+                nextAttemptAt = System.currentTimeMillis() + 60_000L
+            )
+        )
+
+        // 1. Diagnostics MUST expose the exact failed entityType, entityId, operation, retryCount, and Firebase error
+        val failedDiagnostics = repo.observeFailedSyncItems(company.id).first()
+        assertEquals(1, failedDiagnostics.size)
+        assertEquals("audit", failedDiagnostics.first().entityType)
+        assertEquals(auditEntry.id, failedDiagnostics.first().entityId)
+        assertEquals("upsert", failedDiagnostics.first().operation)
+        assertEquals(2, failedDiagnostics.first().retryCount)
+        assertTrue(failedDiagnostics.first().lastError!!.contains("PERMISSION_DENIED"))
+
+        // 2. Remote Firestore already holds the exact immutable COMPANY_REGISTERED document (append-only, updates forbidden)
+        val remoteServerTimestamp = 1_750_002_500_000L
+        val remoteAudits = mutableMapOf(
+            auditEntry.id to RemoteAuditDocument(
+                documentId = auditEntry.id,
+                id = auditEntry.id,
+                companyId = auditEntry.companyId,
+                actorUid = "uid_farster_owner",
+                actorName = auditEntry.actorName,
+                actorRole = auditEntry.actorRole,
+                action = auditEntry.action,
+                targetType = auditEntry.targetType,
+                targetId = auditEntry.targetId,
+                summary = auditEntry.summary,
+                createdAt = auditEntry.createdAt,
+                serverTimestampMillis = remoteServerTimestamp
+            )
+        )
+        var createAttemptCount = 0
+        val strictAppendOnlyGateway = object : AuditRemoteGateway {
+            override suspend fun createAudit(companyId: String, logId: String, payload: Map<String, Any?>) {
+                createAttemptCount++
+                throw IllegalStateException("PERMISSION_DENIED: Missing or insufficient permissions.")
+            }
+
+            override suspend fun fetchAuditFromServer(companyId: String, logId: String): RemoteAuditDocument? =
+                remoteAudits[logId]
+        }
+
+        val syncMgr = CloudSyncManager(context, db, repo)
+        val outcome = syncMgr.executeLockedQueueFlush(
+            targetCompanyId = company.id,
+            retryFailedFirst = true,
+            uploadItem = { item, wasRetry ->
+                assertEquals("audit", item.entityType)
+                assertTrue("Retried failed audit must prefer server verification first", wasRetry)
+                val entry = db.auditLogDao().getById(item.entityId)!!
+                val res = IdempotentAuditUploader.uploadIdempotently(
+                    entry = entry,
+                    actorUidToSend = "uid_farster_owner",
+                    preferVerifyFirst = wasRetry,
+                    gateway = strictAppendOnlyGateway,
+                    serverTimestampValue = "SERVER_TS"
+                )
+                db.auditLogDao().markSynced(entry.id, SyncState.SYNCED, res.serverTimestampMillis)
+            }
+        )
+
+        assertEquals(SyncFlushOutcome.SUCCEEDED, outcome)
+        assertEquals("Should verify existing remote audit without issuing a doomed update/create", 0, createAttemptCount)
+        assertEquals(0, db.syncQueueDao().getPendingCountNow(company.id))
+        assertEquals(0, db.syncQueueDao().getFailedCountNow(company.id))
+        assertTrue(repo.observeFailedSyncItems(company.id).first().isEmpty())
+
+        // Local audit log and FARSTER LLC company remain intact (never deleted or recreated)
+        val syncedAudit = db.auditLogDao().getById(auditEntry.id)!!
+        assertEquals(SyncState.SYNCED, syncedAudit.syncState)
+        assertEquals(remoteServerTimestamp, syncedAudit.serverTimestamp)
+        assertEquals(company.id, repo.getCompany(company.id)!!.id)
+        assertEquals("FARSTER LLC", repo.getCompany(company.id)!!.name)
+
+        // 3. Genuine PERMISSION_DENIED on a non-existent remote audit MUST stay FAILED and populate diagnostics
+        val freshAuditId = UUID.randomUUID().toString()
+        db.auditLogDao().insert(
+            auditEntry.copy(
+                id = freshAuditId,
+                action = "TEST_DENIED_AUDIT",
+                syncState = SyncState.PENDING,
+                serverTimestamp = null
+            )
+        )
+        repo.enqueueSyncInternal(company.id, "audit", freshAuditId, "upsert")
+        val deniedOutcome = syncMgr.executeLockedQueueFlush(
+            targetCompanyId = company.id,
+            retryFailedFirst = false,
+            uploadItem = { item, wasRetry ->
+                val entry = db.auditLogDao().getById(item.entityId)!!
+                IdempotentAuditUploader.uploadIdempotently(
+                    entry = entry,
+                    actorUidToSend = "uid_farster_owner",
+                    preferVerifyFirst = wasRetry,
+                    gateway = strictAppendOnlyGateway,
+                    serverTimestampValue = "SERVER_TS"
+                )
+            }
+        )
+        assertEquals(SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED, deniedOutcome)
+        val afterDenied = repo.observeFailedSyncItems(company.id).first()
+        assertEquals(1, afterDenied.size)
+        assertEquals("audit", afterDenied.first().entityType)
+        assertEquals(freshAuditId, afterDenied.first().entityId)
+        assertEquals("upsert", afterDenied.first().operation)
+        assertTrue(afterDenied.first().lastError!!.contains("PERMISSION_DENIED"))
+        assertTrue(syncMgr.syncState.value.lastError!!.contains(freshAuditId))
     }
 
     private fun encryptTestArchive(zipBytes: ByteArray, passphrase: String): ByteArray {

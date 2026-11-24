@@ -31,6 +31,7 @@ import com.delifar.app.data.PrefKeys
 import com.delifar.app.data.StoreEntity
 import com.delifar.app.data.StoreHoursEntity
 import com.delifar.app.data.StoreWithHours
+import com.delifar.app.data.SyncQueueEntity
 import com.delifar.app.documents.SignatureStrokePoint
 import com.delifar.app.documents.SignedPdfGenerator
 import com.delifar.app.domain.ArchiveImportPreview
@@ -145,6 +146,10 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
         .flatMapLatest { companyId -> repository.observeLatestSyncError(companyId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    val failedSyncItems: StateFlow<List<SyncQueueEntity>> = activeCompanyIdFlow
+        .flatMapLatest { companyId -> repository.observeFailedSyncItems(companyId) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     val syncState: StateFlow<CloudSyncUiState> = syncManager.syncState
 
     val resolvedSyncStatus: StateFlow<CloudSyncStatus> = combine(
@@ -258,7 +263,6 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
     fun triggerSyncNow() {
         viewModelScope.launch(Dispatchers.IO) {
             val activeCompanyId = preferences.value.activeCompanyId
-            repository.retryFailedSyncItems(activeCompanyId)
             if (!FirebaseServices.isConfigured) {
                 syncManager.refreshAuthAndConfigState(preferences.value.lastSyncedAt, preferences.value.lastSyncError)
                 notifyMessage("Offline mode — changes are saved safely on this device.")
@@ -269,20 +273,30 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
                 notifyMessage("Firebase is configured, but you are not signed in. Sign in under Account & Company to sync.")
                 return@launch
             }
-            CloudSyncManager.scheduleBackgroundSync(appContext)
-            when (syncManager.flushPendingQueueDetailed(activeCompanyId)) {
+            // Flush directly under the process-wide queue mutex (resetting failed items atomically inside the lock).
+            // Only enqueue background WorkManager retry if this foreground flush is offline or transiently failed,
+            // preventing a competing SyncWorker from processing the same queue items concurrently.
+            val outcome = syncManager.flushPendingQueueDetailed(
+                companyIdOverride = activeCompanyId,
+                retryFailedFirst = true
+            )
+            when (outcome) {
                 SyncFlushOutcome.SUCCEEDED ->
                     notifyMessage("Synchronized with Firebase cloud.")
-                SyncFlushOutcome.OFFLINE ->
+                SyncFlushOutcome.OFFLINE -> {
+                    CloudSyncManager.scheduleBackgroundSync(appContext)
                     notifyMessage("Device is offline — changes are saved locally and queued for automatic upload.")
+                }
                 SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED ->
                     notifyMessage(syncManager.syncState.value.lastError ?: "Cloud access denied or Firestore backend not configured yet.")
                 SyncFlushOutcome.NOT_SIGNED_IN ->
                     notifyMessage("Authentication required. Sign in to sync.")
                 SyncFlushOutcome.NOT_CONFIGURED ->
                     notifyMessage("Offline mode — Firebase config is not bundled in this build.")
-                SyncFlushOutcome.FAILED_TRANSIENT ->
+                SyncFlushOutcome.FAILED_TRANSIENT -> {
+                    CloudSyncManager.scheduleBackgroundSync(appContext)
                     notifyMessage(syncManager.syncState.value.lastError ?: "Some items failed to upload. Check Sync status or Invoices to retry.")
+                }
             }
         }
     }
@@ -998,10 +1012,17 @@ class DeliFarViewModel(application: Application) : AndroidViewModel(application)
             }
             res.onSuccess {
                 if (FirebaseServices.isConfigured && FirebaseServices.isAuthenticated) {
-                    CloudSyncManager.scheduleBackgroundSync(appContext)
-                    when (syncManager.flushPendingQueueDetailed(activeCompanyId)) {
+                    val outcome = syncManager.flushPendingQueueDetailed(activeCompanyId)
+                    when (outcome) {
                         SyncFlushOutcome.SUCCEEDED -> notifyMessage("Invoice uploaded and synchronized.")
-                        SyncFlushOutcome.OFFLINE -> notifyMessage("Invoice queued — will upload automatically when online.")
+                        SyncFlushOutcome.OFFLINE -> {
+                            CloudSyncManager.scheduleBackgroundSync(appContext)
+                            notifyMessage("Invoice queued — will upload automatically when online.")
+                        }
+                        SyncFlushOutcome.FAILED_TRANSIENT -> {
+                            CloudSyncManager.scheduleBackgroundSync(appContext)
+                            notifyMessage(syncManager.syncState.value.lastError ?: "Invoice upload retry failed.")
+                        }
                         else -> notifyMessage(syncManager.syncState.value.lastError ?: "Invoice upload retry failed.")
                     }
                 } else if (!FirebaseServices.isConfigured) {

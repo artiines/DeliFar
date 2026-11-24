@@ -179,7 +179,7 @@ const server = http.createServer((req, res) => {
       <a class="btn" href="/DeliFar.apk" download="DeliFar.apk">Download DeliFar.apk (${meta.sizeMb} MB)</a>
       <div class="meta">
         <div class="row"><span class="k">Package</span><span class="v">com.delifar.app</span></div>
-        <div class="row"><span class="k">Version</span><span class="v">2.1.1 (code 4)</span></div>
+        <div class="row"><span class="k">Version</span><span class="v">2.1.2 (code 5)</span></div>
         <div class="row"><span class="k">Android Support</span><span class="v">Android 8.0+ (API 26–36)</span></div>
         <div class="row"><span class="k">File Size</span><span class="v">${meta.sizeMb} MB (${meta.sizeBytes.toLocaleString()} bytes)</span></div>
         <div>

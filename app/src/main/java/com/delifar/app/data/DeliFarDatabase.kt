@@ -411,6 +411,18 @@ interface SyncQueueDao {
     @Query("SELECT COUNT(*) FROM sync_queue WHERE companyId = :companyId AND status = 'failed'")
     suspend fun getFailedCountNow(companyId: String): Int
 
+    @Query("SELECT * FROM sync_queue WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): SyncQueueEntity?
+
+    @Query("SELECT * FROM sync_queue WHERE companyId = :companyId AND status = 'failed' ORDER BY createdAt DESC LIMIT 20")
+    fun observeFailedItemsByCompany(companyId: String): Flow<List<SyncQueueEntity>>
+
+    @Query("SELECT * FROM sync_queue WHERE status = 'failed' ORDER BY createdAt DESC LIMIT 20")
+    fun observeFailedItems(): Flow<List<SyncQueueEntity>>
+
+    @Query("SELECT * FROM sync_queue WHERE companyId = :companyId AND status = 'failed' ORDER BY createdAt DESC LIMIT 20")
+    suspend fun getFailedItemsByCompany(companyId: String): List<SyncQueueEntity>
+
     @Query("SELECT lastError FROM sync_queue WHERE companyId = :companyId AND status = 'failed' AND lastError IS NOT NULL ORDER BY createdAt DESC LIMIT 1")
     fun observeLatestErrorByCompany(companyId: String): Flow<String?>
 
