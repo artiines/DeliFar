@@ -7,6 +7,8 @@ import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
@@ -15,10 +17,17 @@ import kotlinx.coroutines.launch
  */
 class DeliFarMessagingService : FirebaseMessagingService() {
 
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    override fun onDestroy() {
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
     @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
     override fun onNewToken(token: String) {
         super.onNewToken(token)
-        CoroutineScope(Dispatchers.IO).launch {
+        serviceScope.launch {
             runCatching {
                 val db = DeliFarDatabase.getInstance(applicationContext)
                 val repo = DeliFarRepository(db)
@@ -43,7 +52,7 @@ class DeliFarMessagingService : FirebaseMessagingService() {
         val title = message.notification?.title ?: message.data["title"] ?: "DeliFar Update"
         val body = message.notification?.body ?: message.data["body"] ?: "You have a new delivery update."
 
-        CoroutineScope(Dispatchers.IO).launch {
+        serviceScope.launch {
             runCatching {
                 val db = DeliFarDatabase.getInstance(applicationContext)
                 val prefs = DeliFarRepository(db).getPreferences()

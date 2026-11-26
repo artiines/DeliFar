@@ -8,6 +8,7 @@ import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import com.delifar.app.cloud.AuditRemoteGateway
+import com.delifar.app.cloud.BackendHealth
 import com.delifar.app.cloud.CloudSyncManager
 import com.delifar.app.cloud.FirebaseServices
 import com.delifar.app.cloud.IdempotentAuditUploader
@@ -30,6 +31,7 @@ import com.delifar.app.data.JobType
 import com.delifar.app.data.PrefKeys
 import com.delifar.app.data.SearchArea
 import com.delifar.app.data.StoreHoursEntity
+import com.delifar.app.data.SyncQueueEntity
 import com.delifar.app.data.SyncState
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
@@ -281,7 +283,7 @@ class DeliFarDatabaseAndWorkflowTests {
 
     @Test
     fun offlineRestartPersistence_storesSurviveDatabaseCloseAndReopen() = runTest {
-        val dbName = "delifar_restart_test_${UUID.randomUUID()}.db"
+        val dbName = "rst_${UUID.randomUUID().toString().take(8)}.db"
         val dbFile = context.getDatabasePath(dbName)
         try {
             val db1 = Room.databaseBuilder(context, DeliFarDatabase::class.java, dbName)
@@ -330,7 +332,7 @@ class DeliFarDatabaseAndWorkflowTests {
 
     @Test
     fun roomMigration5To6_preservesExistingStoresJobsInvoicesAndEnablesCompanyScopedProviderIds() = runTest {
-        val dbName = "delifar_mig56_${UUID.randomUUID()}.db"
+        val dbName = "m56_${UUID.randomUUID().toString().take(8)}.db"
         val dbFile = context.getDatabasePath(dbName)
         try {
             // Create a genuine Room v5 schema database with existing user records
@@ -1677,6 +1679,287 @@ class DeliFarDatabaseAndWorkflowTests {
         assertEquals("upsert", afterDenied.first().operation)
         assertTrue(afterDenied.first().lastError!!.contains("PERMISSION_DENIED"))
         assertTrue(syncMgr.syncState.value.lastError!!.contains(freshAuditId))
+        assertTrue(syncMgr.syncState.value.lastError!!.contains("(attempt 1)"))
+    }
+
+    @Test
+    fun concurrentSyncWorkers_fourWayStressAndFailureCleanup_neverLeaveIsSyncingStuck() = runTest {
+        val company = repo.registerCompany(
+            companyName = "Stress Sync Co",
+            ownerUid = "uid_stress",
+            ownerName = "Owner",
+            ownerEmail = "owner@stress.com",
+            timezone = "America/Los_Angeles",
+            defaultArea = SearchArea.LA
+        ).getOrThrow()
+        val store = repo.saveStore(
+            null, "Stress Deli", "100 Main St, Glendale, CA", 34.1425, -118.2551,
+            null, "", emptyList(), company.id, "uid_stress", "Owner", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+        ).getOrThrow()
+
+        val uploadCounts = ConcurrentHashMap<String, AtomicInteger>()
+        val activeCount = AtomicInteger(0)
+        val maxConcurrent = AtomicInteger(0)
+        val managers = List(4) { CloudSyncManager(context, db, repo) }
+
+        val outcomes = managers.mapIndexed { idx, mgr ->
+            async {
+                mgr.executeLockedQueueFlush(company.id, retryFailedFirst = (idx == 0)) { item, _ ->
+                    val current = activeCount.incrementAndGet()
+                    maxConcurrent.accumulateAndGet(current, ::maxOf)
+                    try {
+                        delay(20)
+                        uploadCounts.computeIfAbsent("${item.entityType}:${item.entityId}") { AtomicInteger(0) }.incrementAndGet()
+                        if (item.entityType == "store" && item.entityId == store.id) {
+                            throw IllegalStateException("Transient network timeout")
+                        }
+                    } finally {
+                        activeCount.decrementAndGet()
+                    }
+                }
+            }
+        }.awaitAll()
+
+        assertEquals(1, maxConcurrent.get())
+        assertTrue(outcomes.contains(SyncFlushOutcome.FAILED_TRANSIENT))
+        managers.forEach { mgr ->
+            assertFalse("isSyncing must always reset via try/finally", mgr.syncState.value.isSyncing)
+            assertNull(mgr.syncState.value.currentlyUploadingInvoiceId)
+        }
+        // Each queued entity was attempted by the first worker; store failed and moved to FAILED backoff
+        val failed = repo.observeFailedSyncItems(company.id).first()
+        assertEquals(1, failed.size)
+        assertEquals("store", failed.first().entityType)
+        assertEquals(store.id, failed.first().entityId)
+        assertEquals("upsert", failed.first().operation)
+        assertEquals(1, failed.first().retryCount)
+        assertTrue(failed.first().lastError!!.contains("Transient network timeout"))
+    }
+
+    @Test
+    fun executeLockedQueueFlush_deferredPermissionDeniedAndSelfHealingInvoiceFileRecovery() = runTest {
+        val company = repo.registerCompany(
+            companyName = "Recovery Co",
+            ownerUid = "uid_rec",
+            ownerName = "Owner",
+            ownerEmail = "owner@rec.com",
+            timezone = "America/Los_Angeles",
+            defaultArea = SearchArea.LA
+        ).getOrThrow()
+        val store = repo.saveStore(
+            null, "Rec Market", "200 Brand Blvd, Glendale, CA", 34.1450, -118.2551,
+            null, "", emptyList(), company.id, "uid_rec", "Owner", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+        ).getOrThrow()
+        val inv = repo.createInvoice(
+            companyId = company.id,
+            jobId = null,
+            storeId = store.id,
+            storeName = store.name,
+            invoiceNumber = "INV-HEAL-1",
+            notes = "",
+            pages = listOf(
+                InvoicePageEntity(
+                    id = "pg_h1", invoiceId = "inv_h1", pageIndex = 0,
+                    originalLocalPath = "/tmp/o.jpg", editedLocalPath = "/tmp/e.jpg",
+                    originalSha256 = "sha1", editedSha256 = "sha2", byteSize = 100L
+                )
+            ),
+            actorUid = "uid_rec",
+            actorName = "Owner",
+            actorRole = EmployeeRole.OWNER
+        ).getOrThrow()
+
+        // Clear all queue items and insert a deferred FAILED item with PERMISSION_DENIED in future backoff
+        db.syncQueueDao().getDueItemsForCompany(company.id, Long.MAX_VALUE).forEach { db.syncQueueDao().delete(it.id) }
+        db.syncQueueDao().upsert(
+            SyncQueueEntity(
+                id = "audit:aud_denied_1",
+                companyId = company.id,
+                entityType = "audit",
+                entityId = "aud_denied_1",
+                operation = "upsert",
+                retryCount = 3,
+                status = SyncState.FAILED,
+                lastError = "PERMISSION_DENIED: Missing or insufficient permissions.",
+                createdAt = System.currentTimeMillis() - 10_000L,
+                nextAttemptAt = System.currentTimeMillis() + 300_000L
+            )
+        )
+
+        val syncMgr = CloudSyncManager(context, db, repo)
+        val deferredOutcome = syncMgr.executeLockedQueueFlush(company.id, retryFailedFirst = false) { _, _ -> }
+        assertEquals(SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED, deferredOutcome)
+        assertEquals(BackendHealth.ACCESS_DENIED, syncMgr.syncState.value.backendHealth)
+        assertTrue(syncMgr.syncState.value.lastError!!.contains("(attempt 3)"))
+        assertTrue(syncMgr.syncState.value.lastError!!.contains("aud_denied_1"))
+
+        // Mixed queue: one due store succeeds while deferred FAILED item still remains in backoff -> MUST NOT return SUCCEEDED or wipe lastError
+        repo.enqueueSyncInternal(company.id, "store", store.id, "upsert")
+        val mixedOutcome = syncMgr.executeLockedQueueFlush(company.id, retryFailedFirst = false) { _, _ -> }
+        assertEquals(SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED, mixedOutcome)
+        assertTrue(syncMgr.syncState.value.lastError!!.contains("aud_denied_1"))
+        assertEquals(1, db.syncQueueDao().getFailedCountNow(company.id))
+
+        // retryFailedSyncItems clears LAST_SYNC_ERROR transactionally
+        repo.setPreference(PrefKeys.LAST_SYNC_ERROR, "Previous sync error")
+        repo.retryFailedSyncItems(company.id)
+        assertNull(repo.getPreferences().lastSyncError)
+
+        // Now test self-healing recovery when invoice metadata fails with INCOMPLETE_REMOTE_ATTACHMENTS
+        db.syncQueueDao().getDueItemsForCompany(company.id, Long.MAX_VALUE).forEach { db.syncQueueDao().delete(it.id) }
+        repo.enqueueSyncInternal(company.id, "invoice", inv.invoice.id, "upsert")
+        val healOutcome = syncMgr.executeLockedQueueFlush(company.id, retryFailedFirst = false) { item, _ ->
+            if (item.entityType == "invoice") {
+                throw InvoiceUploadException(
+                    InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS,
+                    "Signature has not finished uploading."
+                )
+            }
+        }
+        assertEquals(SyncFlushOutcome.FAILED_TRANSIENT, healOutcome)
+        val dueAfterHeal = db.syncQueueDao().getDueItemsForCompany(company.id, Long.MAX_VALUE)
+        assertTrue(
+            "Self-healing must re-enqueue invoice_file as PENDING",
+            dueAfterHeal.any { it.entityType == "invoice_file" && it.entityId == inv.invoice.id && it.status == SyncState.PENDING }
+        )
+        assertEquals(InvoiceStatus.UPLOAD_FAILED, repo.getInvoiceWithPages(inv.invoice.id, company.id)!!.invoice.status)
+    }
+
+    @Test
+    fun voidedInvoiceRetryAndLocalMigrationAndCrossCompanyBackup_preserveStatusesAndCleanForeignPaths() = runTest {
+        val tempDir = File(context.cacheDir, "void_mig_test_${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val compA = repo.registerCompany(
+                "Comp A", "u_a", "Owner A", "a@comp.com", "America/Los_Angeles", SearchArea.LA
+            ).getOrThrow()
+            val compB = repo.registerCompany(
+                "Comp B", "u_b", "Owner B", "b@comp.com", "America/Los_Angeles", SearchArea.SAC
+            ).getOrThrow()
+            val storeA = repo.saveStore(
+                null, "A Store", "100 Main St, Glendale, CA", 34.1425, -118.2551,
+                null, "", emptyList(), compA.id, "u_a", "Owner A", EmployeeRole.OWNER, true, GeocodeSource.MANUAL_PIN
+            ).getOrThrow()
+
+            val jpgBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 1, 2, 3)
+            val pngBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 4, 5)
+            val pdfBytes = "%PDF-1.4\n%%EOF\n".toByteArray(Charsets.US_ASCII)
+
+            val pageFile = File(tempDir, "p.jpg").apply { writeBytes(jpgBytes) }
+            val sigFile = File(tempDir, "s.png").apply { writeBytes(pngBytes) }
+            val pdfFile = File(tempDir, "signed.pdf").apply { writeBytes(pdfBytes) }
+
+            val inv = repo.createInvoice(
+                companyId = compA.id, jobId = null, storeId = storeA.id, storeName = storeA.name,
+                invoiceNumber = "INV-VOID-1", notes = "",
+                pages = listOf(
+                    InvoicePageEntity(
+                        id = "pg_v1", invoiceId = "inv_v1", pageIndex = 0,
+                        originalLocalPath = pageFile.absolutePath, editedLocalPath = pageFile.absolutePath,
+                        originalSha256 = InvoiceSyncValidator.sha256Bytes(jpgBytes),
+                        editedSha256 = InvoiceSyncValidator.sha256Bytes(jpgBytes),
+                        byteSize = pageFile.length()
+                    )
+                ),
+                actorUid = "u_a", actorName = "Owner A", actorRole = EmployeeRole.OWNER
+            ).getOrThrow()
+            val signed = repo.signInvoice(
+                invoiceId = inv.invoice.id, recipientName = "Sam", recipientTitle = "Mgr",
+                acknowledgmentConfirmed = true, signatureLocalPath = sigFile.absolutePath,
+                signaturePageIndex = 0, signaturePosX = 0.5f, signaturePosY = 0.8f,
+                signedPdfLocalPath = pdfFile.absolutePath,
+                signedPdfSha256 = InvoiceSyncValidator.sha256Bytes(pdfBytes),
+                signedPdfBytes = pdfFile.length(),
+                actorUid = "u_a", actorName = "Owner A", actorRole = EmployeeRole.OWNER, companyId = compA.id
+            ).getOrThrow()
+
+            // Simulate fully synced immutable invoice with remote paths -> retryInvoiceUpload must succeed without downgrading
+            db.invoiceDao().upsertInvoice(
+                signed.copy(
+                    status = InvoiceStatus.SYNCHRONIZED,
+                    syncState = SyncState.SYNCED,
+                    signatureStoragePath = "companies/${compA.id}/invoices/${signed.id}/signature.png",
+                    signedPdfStoragePath = "companies/${compA.id}/invoices/${signed.id}/signed_v1.pdf"
+                )
+            )
+            db.invoiceDao().upsertPages(
+                inv.pages.map {
+                    it.copy(
+                        originalStoragePath = "companies/${compA.id}/invoices/${signed.id}/orig_${it.id}.jpg",
+                        editedStoragePath = "companies/${compA.id}/invoices/${signed.id}/edit_${it.id}.jpg"
+                    )
+                }
+            )
+            val alreadySyncedRetry = repo.retryInvoiceUpload(signed.id, compA.id)
+            assertTrue(alreadySyncedRetry.isSuccess)
+            val afterAlreadySynced = repo.getInvoiceWithPages(signed.id, compA.id)!!.invoice
+            assertEquals(InvoiceStatus.SYNCHRONIZED, afterAlreadySynced.status)
+            assertEquals(SyncState.SYNCED, afterAlreadySynced.syncState)
+
+            // Cross-company encrypted backup restore MUST clear foreign *StoragePath fields
+            val archiveFile = File(tempDir, "cross.delifarbak")
+            EncryptedArchiveBackupManager(db).exportEncryptedArchive(compA.id, "StrongPass123!", archiveFile).getOrThrow()
+            val targetFilesDir = File(tempDir, "restored_b").apply { mkdirs() }
+            EncryptedArchiveBackupManager(db).restoreEncryptedArchive(
+                archiveFile = archiveFile,
+                passphrase = "StrongPass123!",
+                targetFilesDir = targetFilesDir,
+                replaceConflicts = true,
+                restorePreferences = false,
+                activeCompanyId = compB.id,
+                allowCrossCompanyRestore = true
+            ).getOrThrow()
+            val crossRestoredInv = db.invoiceDao().getInvoiceWithPages(signed.id)!!
+            assertEquals(compB.id, crossRestoredInv.invoice.companyId)
+            assertNull(crossRestoredInv.invoice.signatureStoragePath)
+            assertNull(crossRestoredInv.invoice.signedPdfStoragePath)
+            assertNull(crossRestoredInv.sortedPages.first().originalStoragePath)
+            assertNull(crossRestoredInv.sortedPages.first().editedStoragePath)
+
+            // Voided invoice with missing PDF MUST keep InvoiceStatus.VOIDED (never downgraded to UPLOAD_FAILED)
+            repo.voidInvoice(signed.id, "Canceled order", "u_a", "Owner A", EmployeeRole.OWNER, compB.id).getOrThrow()
+            File(crossRestoredInv.invoice.signedPdfLocalPath!!).delete()
+            val voidedMissingPdfRetry = repo.retryInvoiceUpload(signed.id, compB.id)
+            assertTrue(voidedMissingPdfRetry.isFailure)
+            val afterVoidRetry = repo.getInvoiceWithPages(signed.id, compB.id)!!.invoice
+            assertEquals(InvoiceStatus.VOIDED, afterVoidRetry.status)
+            assertEquals(SyncState.FAILED, afterVoidRetry.syncState)
+
+            // Offline unmigrated store/invoice migration queues invoice_file before invoice & reassigns blank UIDs
+            val localStore = repo.saveStore(
+                null, "Unmigrated Store", "300 Main St, Glendale, CA", 34.1400, -118.2500,
+                null, "", emptyList(), companyId = "", actorUid = "", actorName = "Local",
+                actorRole = EmployeeRole.OWNER, locationConfirmed = true, geocodeSource = GeocodeSource.MANUAL_PIN
+            ).getOrThrow()
+            val localInv = repo.createInvoice(
+                companyId = "", jobId = null, storeId = localStore.id, storeName = localStore.name,
+                invoiceNumber = "INV-LOC-1", notes = "",
+                pages = listOf(
+                    InvoicePageEntity(
+                        id = "pg_loc_1", invoiceId = "inv_loc_1", pageIndex = 0,
+                        originalLocalPath = pageFile.absolutePath, editedLocalPath = pageFile.absolutePath,
+                        originalSha256 = InvoiceSyncValidator.sha256Bytes(jpgBytes),
+                        editedSha256 = InvoiceSyncValidator.sha256Bytes(jpgBytes),
+                        byteSize = pageFile.length()
+                    )
+                ),
+                actorUid = "", actorName = "Local", actorRole = EmployeeRole.OWNER
+            ).getOrThrow()
+
+            repo.migrateLocalDataToCompany(
+                companyId = compA.id,
+                actorUid = "u_a",
+                actorName = "Owner A",
+                actorRole = EmployeeRole.OWNER
+            ).getOrThrow()
+
+            assertEquals("u_a", db.storeDao().getStore(localStore.id)!!.updatedByUid)
+            assertEquals("u_a", db.invoiceDao().getInvoiceWithPages(localInv.invoice.id)!!.invoice.createdByUid)
+            val migratedQueue = db.syncQueueDao().getDueItemsForCompany(compA.id, Long.MAX_VALUE)
+            assertTrue(migratedQueue.any { it.entityType == "invoice_file" && it.entityId == localInv.invoice.id })
+            assertTrue(migratedQueue.any { it.entityType == "invoice" && it.entityId == localInv.invoice.id })
+        } finally {
+            tempDir.deleteRecursively()
+        }
     }
 
     private fun encryptTestArchive(zipBytes: ByteArray, passphrase: String): ByteArray {

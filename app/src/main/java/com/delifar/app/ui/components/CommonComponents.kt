@@ -11,6 +11,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,7 +22,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Call
@@ -39,18 +43,28 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -66,6 +80,7 @@ import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.HoursMode
 import com.delifar.app.data.InvoiceStatus
 import com.delifar.app.data.JobIssue
+import com.delifar.app.data.JobItemEntity
 import com.delifar.app.data.JobListRow
 import com.delifar.app.data.JobStatus
 import com.delifar.app.data.JobType
@@ -81,26 +96,41 @@ import com.delifar.app.ui.theme.SuccessGreen
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 val LocalLocalizedContext = compositionLocalOf<Context> {
     error("LocalLocalizedContext not provided")
 }
 
+val LocalAppLocale = compositionLocalOf<Locale> {
+    Locale.getDefault()
+}
+
 @Composable
 fun ProvideAppLocale(languageCode: String, content: @Composable () -> Unit) {
     val baseContext = LocalContext.current
-    val localizedContext = remember(baseContext, languageCode) {
+    val resolvedLocale = remember(baseContext, languageCode) {
+        if (languageCode == "system") {
+            baseContext.resources.configuration.locales.takeIf { !it.isEmpty }?.get(0) ?: Locale.getDefault()
+        } else {
+            Locale(languageCode)
+        }
+    }
+    val localizedContext = remember(baseContext, languageCode, resolvedLocale) {
         if (languageCode == "system") {
             baseContext
         } else {
-            val locale = Locale(languageCode)
             val cfg = Configuration(baseContext.resources.configuration)
-            cfg.setLocale(locale)
+            cfg.setLocale(resolvedLocale)
             baseContext.createConfigurationContext(cfg)
         }
     }
-    CompositionLocalProvider(LocalLocalizedContext provides localizedContext, content = content)
+    CompositionLocalProvider(
+        LocalLocalizedContext provides localizedContext,
+        LocalAppLocale provides resolvedLocale,
+        content = content
+    )
 }
 
 @Composable
@@ -355,6 +385,8 @@ fun JobCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     receivingHoursToday: String? = null,
+    storeHours: List<StoreHoursEntity> = emptyList(),
+    stopNumber: Int? = null,
     onQuickNavigate: (() -> Unit)? = null,
     onQuickCall: (() -> Unit)? = null,
     onQuickAdvanceStatus: (() -> Unit)? = null,
@@ -402,12 +434,25 @@ fun JobCard(
                     }
                     Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = row.displayStoreName,
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (stopNumber != null) {
+                                StatusTag(
+                                    text = "#$stopNumber",
+                                    bg = MaterialTheme.colorScheme.primary,
+                                    fg = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
+                            Text(
+                                text = row.displayStoreName,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                        }
                         Text(
                             text = row.displayStoreAddress,
                             style = MaterialTheme.typography.bodyMedium,
@@ -518,15 +563,29 @@ fun JobCard(
                 }
             }
 
-            if (!receivingHoursToday.isNullOrBlank()) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "${lStr(R.string.receiving_hours)}: $receivingHoursToday",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+            if (!receivingHoursToday.isNullOrBlank() || storeHours.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    if (!receivingHoursToday.isNullOrBlank()) {
+                        Text(
+                            text = "${lStr(R.string.receiving_hours)}: $receivingHoursToday",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    } else {
+                        Spacer(Modifier.width(1.dp))
+                    }
+                    if (storeHours.isNotEmpty()) {
+                        ReceivingWindowStatusTag(hours = storeHours, zoneId = zoneId)
+                    }
+                }
             }
 
             // One-handed driver quick actions (only shown when callbacks provided and job is active)
@@ -556,7 +615,7 @@ fun JobCard(
                         OutlinedButton(
                             onClick = onQuickCall,
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                            modifier = Modifier.defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
                         ) {
                             Icon(Icons.Default.Call, contentDescription = lStr(R.string.call_store), modifier = Modifier.size(16.dp))
                         }
@@ -565,7 +624,7 @@ fun JobCard(
                         OutlinedButton(
                             onClick = onQuickInvoice,
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                            modifier = Modifier.defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
                         ) {
                             Icon(Icons.Default.Description, contentDescription = lStr(R.string.quick_invoice_action), modifier = Modifier.size(16.dp))
                         }
@@ -597,6 +656,123 @@ fun JobCard(
             }
         }
     }
+}
+
+@Composable
+fun ReceivingWindowStatusTag(
+    hours: List<StoreHoursEntity>,
+    zoneId: ZoneId = BusinessRules.LA_ZONE
+) {
+    val status = remember(hours, zoneId) {
+        val now = BusinessRules.nowInZone(zoneId)
+        val dateIso = now.toLocalDate().toString()
+        val timeStr = now.toLocalTime().format(DateTimeFormatter.ofPattern("HH:mm"))
+        BusinessRules.checkReceivingHours(hours, dateIso, timeStr)
+    }
+    when (status) {
+        BusinessRules.HoursCheckResult.OK -> StatusTag(
+            text = lStr(R.string.receiving_open_now),
+            bg = SuccessContainer,
+            fg = SuccessGreen
+        )
+        BusinessRules.HoursCheckResult.OUTSIDE_WINDOWS -> StatusTag(
+            text = lStr(R.string.receiving_outside_hours),
+            bg = AmberContainer,
+            fg = AmberAccent
+        )
+        BusinessRules.HoursCheckResult.CLOSED -> StatusTag(
+            text = lStr(R.string.receiving_closed_today),
+            bg = TerracottaContainer,
+            fg = TerracottaError
+        )
+        BusinessRules.HoursCheckResult.UNKNOWN -> Unit
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun ReportIssueDialog(
+    items: List<JobItemEntity>,
+    initialIssue: String?,
+    initialNote: String,
+    onDismiss: () -> Unit,
+    onSubmit: (issueType: String, note: String, keepOpen: Boolean, actuals: Map<String, String>) -> Unit
+) {
+    var selectedIssue by remember(initialIssue) { mutableStateOf(initialIssue ?: JobIssue.PARTIAL) }
+    var note by remember(initialNote) { mutableStateOf(initialNote) }
+    var keepOpen by remember { mutableStateOf(true) }
+    val actuals = remember(items) {
+        mutableStateMapOf<String, String>().apply {
+            items.forEach { this[it.id] = it.actual ?: it.planned }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(lStr(R.string.action_report_issue)) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf(
+                        JobIssue.PARTIAL,
+                        JobIssue.CLOSED,
+                        JobIssue.REFUSED,
+                        JobIssue.UNAVAILABLE,
+                        JobIssue.DAMAGED,
+                        JobIssue.UNSIGNED,
+                        JobIssue.OTHER
+                    ).forEach { issue ->
+                        FilterChip(
+                            selected = selectedIssue == issue,
+                            onClick = { selectedIssue = issue },
+                            label = { Text(issueLabel(issue)) }
+                        )
+                    }
+                }
+
+                if (selectedIssue == JobIssue.PARTIAL && items.isNotEmpty()) {
+                    HorizontalDivider()
+                    items.forEach { line ->
+                        OutlinedTextField(
+                            value = actuals[line.id] ?: "0",
+                            onValueChange = { actuals[line.id] = it },
+                            label = { Text("${line.name} (${lStr(R.string.planned_qty)} ${line.planned} ${line.unit})") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it },
+                    label = { Text(lStr(R.string.issue_note_label)) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = keepOpen, onCheckedChange = { keepOpen = it })
+                    Text(lStr(R.string.keep_work_open), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSubmit(selectedIssue, note, keepOpen, actuals.toMap())
+                }
+            ) { Text(lStr(R.string.save)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(lStr(R.string.cancel)) }
+        }
+    )
 }
 
 @Composable

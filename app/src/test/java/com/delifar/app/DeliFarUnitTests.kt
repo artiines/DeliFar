@@ -7,13 +7,24 @@ import com.delifar.app.cloud.CloudSyncStatus
 import com.delifar.app.cloud.CloudSyncUiState
 import com.delifar.app.cloud.FirebaseServices
 import com.delifar.app.cloud.IdempotentAuditUploader
+import com.delifar.app.cloud.InvoiceMetadataGateway
+import com.delifar.app.cloud.InvoiceMetadataUploadResolution
+import com.delifar.app.cloud.InvoiceSyncValidator
+import com.delifar.app.cloud.InvoiceUploadErrorCode
+import com.delifar.app.cloud.InvoiceUploadException
 import com.delifar.app.cloud.RemoteAuditDocument
+import com.delifar.app.cloud.RemoteInvoiceSnapshot
 import com.delifar.app.cloud.SyncStatusResolver
 import com.delifar.app.data.AuditLogEntity
 import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.HoursMode
+import com.delifar.app.data.InvoiceEntity
+import com.delifar.app.data.InvoicePageEntity
+import com.delifar.app.data.InvoiceStatus
+import com.delifar.app.data.InvoiceWithPages
 import com.delifar.app.data.JobStatus
 import com.delifar.app.data.StoreHoursEntity
+import com.delifar.app.data.SyncState
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
 import com.delifar.app.network.GeoPoint
@@ -529,5 +540,331 @@ class DeliFarUnitTests {
         }
         assertTrue(genuineDenied.isFailure)
         assertTrue(genuineDenied.exceptionOrNull()!!.message!!.contains("PERMISSION_DENIED", ignoreCase = true))
+    }
+
+    @Test
+    fun idempotentAuditUploader_rejectsMissingCreatedAtAndLocalUidFallback() = runTest {
+        val localEntry = AuditLogEntity(
+            id = "audit_local_1",
+            companyId = "cmp_farster",
+            actorUid = "local_offline_owner_1",
+            actorName = "Owner",
+            actorRole = EmployeeRole.OWNER,
+            action = "COMPANY_REGISTERED",
+            targetType = "company",
+            targetId = "cmp_farster",
+            summary = "Registered company",
+            createdAt = 1_750_000_000_000L
+        )
+        val missingCreatedAtRemote = RemoteAuditDocument(
+            documentId = localEntry.id,
+            id = localEntry.id,
+            companyId = localEntry.companyId,
+            actorUid = "firebase_uid_owner",
+            actorName = localEntry.actorName,
+            actorRole = localEntry.actorRole,
+            action = localEntry.action,
+            targetType = localEntry.targetType,
+            targetId = localEntry.targetId,
+            summary = localEntry.summary,
+            createdAt = null,
+            serverTimestampMillis = 1_750_000_123_456L
+        )
+        assertFalse(
+            IdempotentAuditUploader.matchesImmutableAudit(
+                entry = localEntry,
+                expectedActorUid = "firebase_uid_owner",
+                remote = missingCreatedAtRemote
+            )
+        )
+
+        // When entry.actorUid is local_*, remote doc holding local_* MUST NOT match a different expectedActorUid
+        val localUidRemote = missingCreatedAtRemote.copy(
+            actorUid = "local_offline_owner_1",
+            createdAt = localEntry.createdAt
+        )
+        assertFalse(
+            IdempotentAuditUploader.matchesImmutableAudit(
+                entry = localEntry,
+                expectedActorUid = "firebase_uid_owner",
+                remote = localUidRemote
+            )
+        )
+
+        val validRemote = localUidRemote.copy(actorUid = "firebase_uid_owner")
+        assertTrue(
+            IdempotentAuditUploader.matchesImmutableAudit(
+                entry = localEntry,
+                expectedActorUid = "firebase_uid_owner",
+                remote = validRemote
+            )
+        )
+    }
+
+    @Test
+    fun invoiceSyncValidator_uploadInvoiceMetadataIdempotently_recoversPartialSuccessAndEnforcesImmutability() = runTest {
+        val page = InvoicePageEntity(
+            id = "pg_1",
+            invoiceId = "inv_meta_1",
+            pageIndex = 0,
+            originalLocalPath = "/tmp/orig.jpg",
+            editedLocalPath = "/tmp/edit.jpg",
+            originalStoragePath = "companies/cmp_1/invoices/inv_meta_1/orig_pg_1.jpg",
+            editedStoragePath = "companies/cmp_1/invoices/inv_meta_1/edit_pg_1.jpg",
+            originalSha256 = "sha_o",
+            editedSha256 = "sha_e",
+            byteSize = 1024L
+        )
+        val signedInvoice = InvoiceEntity(
+            id = "inv_meta_1",
+            companyId = "cmp_1",
+            jobId = "job_1",
+            storeId = "store_1",
+            storeName = "Glendale Deli",
+            invoiceNumber = "INV-1001",
+            status = InvoiceStatus.PENDING_UPLOAD,
+            version = 1,
+            createdByUid = "uid_drv",
+            createdByName = "Driver",
+            createdAt = 1_750_000_000_000L,
+            modifiedAt = 1_750_000_050_000L,
+            signed = true,
+            recipientName = "Elena Petrova",
+            recipientTitle = "Manager",
+            acknowledgmentConfirmed = true,
+            signatureStoragePath = "companies/cmp_1/invoices/inv_meta_1/signature.png",
+            signedPdfStoragePath = "companies/cmp_1/invoices/inv_meta_1/signed_v1.pdf",
+            signedPdfSha256 = "deadbeef1234",
+            totalBytes = 2048L,
+            syncState = SyncState.PENDING
+        )
+        val signedIwp = InvoiceWithPages(signedInvoice, listOf(page))
+
+        // Signed invoice missing signedPdfSha256 MUST fail validation before metadata sync
+        val missingShaEx = runCatching {
+            InvoiceSyncValidator.assertInvoiceReadyForMetadataSync(
+                InvoiceWithPages(signedInvoice.copy(signedPdfSha256 = ""), listOf(page))
+            )
+        }.exceptionOrNull() as? InvoiceUploadException
+        assertEquals(InvoiceUploadErrorCode.CHECKSUM_MISMATCH, missingShaEx?.code)
+
+        var remoteSnapshot: RemoteInvoiceSnapshot? = null
+        var createShouldDeny = false
+        var createCalls = 0
+        var mergeCalls = 0
+        val recordedTargetedUpdates = mutableListOf<Map<String, Any?>>()
+
+        val fakeGateway = object : InvoiceMetadataGateway {
+            override suspend fun fetchInvoiceFromServer(companyId: String, invoiceId: String): RemoteInvoiceSnapshot? =
+                remoteSnapshot
+
+            override suspend fun createInvoice(companyId: String, invoiceId: String, payload: Map<String, Any?>) {
+                createCalls++
+                if (createShouldDeny || remoteSnapshot != null) {
+                    throw IllegalStateException("PERMISSION_DENIED: Signed invoice is immutable.")
+                }
+                remoteSnapshot = RemoteInvoiceSnapshot(
+                    documentId = invoiceId,
+                    id = invoiceId,
+                    companyId = companyId,
+                    storeId = signedInvoice.storeId,
+                    invoiceNumber = signedInvoice.invoiceNumber,
+                    version = signedInvoice.version,
+                    status = payload["status"] as String,
+                    signed = payload["signed"] as Boolean,
+                    recipientName = signedInvoice.recipientName,
+                    signatureStoragePath = signedInvoice.signatureStoragePath,
+                    signedPdfStoragePath = signedInvoice.signedPdfStoragePath,
+                    signedPdfSha256 = signedInvoice.signedPdfSha256,
+                    signedServerAtMillis = 1_750_000_060_000L
+                )
+            }
+
+            override suspend fun mergeUnsignedInvoice(companyId: String, invoiceId: String, payload: Map<String, Any?>) {
+                mergeCalls++
+            }
+
+            override suspend fun updateSignedInvoiceFields(companyId: String, invoiceId: String, fields: Map<String, Any?>) {
+                recordedTargetedUpdates += fields
+                val cur = remoteSnapshot!!
+                remoteSnapshot = cur.copy(
+                    status = (fields["status"] as? String) ?: cur.status,
+                    signedServerAtMillis = cur.signedServerAtMillis ?: if (fields.containsKey("signedServerAt")) 1_750_000_070_000L else null
+                )
+            }
+        }
+
+        val buildPayload: (InvoiceWithPages, String) -> Map<String, Any?> = { iwp, finalStatus ->
+            mapOf("id" to iwp.invoice.id, "status" to finalStatus, "signed" to iwp.invoice.signed)
+        }
+
+        // 1. Fresh signed invoice creates once
+        val created = InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+            iwp = signedIwp,
+            finalStatus = InvoiceStatus.SYNCHRONIZED,
+            wasRetry = false,
+            gateway = fakeGateway,
+            buildFullPayload = buildPayload,
+            serverTimestampValue = "SERVER_TS"
+        )
+        assertEquals(InvoiceMetadataUploadResolution.CREATED, created.resolution)
+        assertEquals(1, createCalls)
+
+        // 2. Retry after dropped ack finds SYNCHRONIZED doc matching all immutable fields -> ALREADY_SYNCED_VERIFIED
+        val verified = InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+            iwp = signedIwp,
+            finalStatus = InvoiceStatus.SYNCHRONIZED,
+            wasRetry = true,
+            gateway = fakeGateway,
+            buildFullPayload = buildPayload,
+            serverTimestampValue = "SERVER_TS"
+        )
+        assertEquals(InvoiceMetadataUploadResolution.ALREADY_SYNCED_VERIFIED, verified.resolution)
+        assertEquals(1_750_000_060_000L, verified.signedServerAtMillis)
+        assertEquals(1, createCalls)
+        assertTrue(recordedTargetedUpdates.isEmpty())
+
+        // 3. Partial success where remote is SIGNED (without signedServerAt) -> 4-field targeted finalization
+        remoteSnapshot = remoteSnapshot!!.copy(status = InvoiceStatus.SIGNED, signedServerAtMillis = null)
+        val finalized = InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+            iwp = signedIwp,
+            finalStatus = InvoiceStatus.SYNCHRONIZED,
+            wasRetry = true,
+            gateway = fakeGateway,
+            buildFullPayload = buildPayload,
+            serverTimestampValue = "SERVER_TS"
+        )
+        assertEquals(InvoiceMetadataUploadResolution.FINALIZED_SIGNED, finalized.resolution)
+        assertEquals(1, recordedTargetedUpdates.size)
+        assertEquals(
+            setOf("status", "modifiedAt", "serverUpdatedAt", "signedServerAt"),
+            recordedTargetedUpdates.last().keys
+        )
+        assertEquals(InvoiceStatus.SYNCHRONIZED, remoteSnapshot!!.status)
+
+        // 4. Voiding signed invoice uses targeted 4-field void update without rewriting immutable fields (and blank reason falls back to "Voided")
+        val voided = InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+            iwp = InvoiceWithPages(signedInvoice.copy(status = InvoiceStatus.VOIDED, voidedReason = "  "), listOf(page)),
+            finalStatus = InvoiceStatus.VOIDED,
+            wasRetry = false,
+            gateway = fakeGateway,
+            buildFullPayload = buildPayload,
+            serverTimestampValue = "SERVER_TS"
+        )
+        assertEquals(InvoiceMetadataUploadResolution.VOIDED_SIGNED, voided.resolution)
+        assertEquals(
+            setOf("status", "voidedReason", "modifiedAt", "serverUpdatedAt"),
+            recordedTargetedUpdates.last().keys
+        )
+        assertEquals("Voided", recordedTargetedUpdates.last()["voidedReason"])
+
+        // 4b. resolveEditedAttachmentSource aligns PNG/JPEG and fallback to originalLocalPath
+        val fallbackPngPage = page.copy(originalLocalPath = "/tmp/scan.png", editedLocalPath = "", editedSha256 = "")
+        assertEquals(Triple("/tmp/scan.png", "image/png", "png"), InvoiceSyncValidator.resolveEditedAttachmentSource(fallbackPngPage))
+        assertEquals(Triple("/tmp/edit.jpg", "image/jpeg", "jpg"), InvoiceSyncValidator.resolveEditedAttachmentSource(page))
+
+        // 5. Trying to un-void a server-VOIDED invoice MUST fail
+        val unvoidAttempt = runCatching {
+            InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+                iwp = signedIwp,
+                finalStatus = InvoiceStatus.SYNCHRONIZED,
+                wasRetry = true,
+                gateway = fakeGateway,
+                buildFullPayload = buildPayload,
+                serverTimestampValue = "SERVER_TS"
+            )
+        }
+        assertTrue(unvoidAttempt.isFailure)
+        assertTrue(unvoidAttempt.exceptionOrNull()!!.message!!.contains("voided", ignoreCase = true))
+
+        // 6. Tampered remote signedPdfSha256 MUST be rejected
+        remoteSnapshot = remoteSnapshot!!.copy(status = InvoiceStatus.SYNCHRONIZED, signedPdfSha256 = "tampered_hash")
+        val tamperAttempt = runCatching {
+            InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+                iwp = signedIwp,
+                finalStatus = InvoiceStatus.SYNCHRONIZED,
+                wasRetry = true,
+                gateway = fakeGateway,
+                buildFullPayload = buildPayload,
+                serverTimestampValue = "SERVER_TS"
+            )
+        }
+        assertTrue(tamperAttempt.isFailure)
+        assertTrue(tamperAttempt.exceptionOrNull()!!.message!!.contains("mismatched", ignoreCase = true))
+
+        // 7. Genuine PERMISSION_DENIED when no remote doc exists MUST propagate
+        remoteSnapshot = null
+        createShouldDeny = true
+        val genuineDenied = runCatching {
+            InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+                iwp = signedIwp,
+                finalStatus = InvoiceStatus.SYNCHRONIZED,
+                wasRetry = false,
+                gateway = fakeGateway,
+                buildFullPayload = buildPayload,
+                serverTimestampValue = "SERVER_TS"
+            )
+        }
+        assertTrue(genuineDenied.isFailure)
+        assertTrue(genuineDenied.exceptionOrNull()!!.message!!.contains("PERMISSION_DENIED"))
+
+        // 8. Unsigned invoice already on server merges cleanly
+        createShouldDeny = false
+        val unsignedIwp = InvoiceWithPages(signedInvoice.copy(signed = false, status = InvoiceStatus.NOT_SIGNED), listOf(page))
+        remoteSnapshot = RemoteInvoiceSnapshot(
+            documentId = signedInvoice.id, id = signedInvoice.id, companyId = signedInvoice.companyId,
+            storeId = signedInvoice.storeId, invoiceNumber = signedInvoice.invoiceNumber, version = 1,
+            status = InvoiceStatus.NOT_SIGNED, signed = false, recipientName = "",
+            signatureStoragePath = null, signedPdfStoragePath = null, signedPdfSha256 = null, signedServerAtMillis = null
+        )
+        val mergedUnsigned = InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+            iwp = unsignedIwp,
+            finalStatus = InvoiceStatus.NOT_SIGNED,
+            wasRetry = true,
+            gateway = fakeGateway,
+            buildFullPayload = buildPayload,
+            serverTimestampValue = "SERVER_TS"
+        )
+        assertEquals(InvoiceMetadataUploadResolution.MERGED_UNSIGNED, mergedUnsigned.resolution)
+        assertEquals(1, mergeCalls)
+    }
+
+    @Test
+    fun syncStatusResolver_usesPersistedErrorAndTimestampFallbacksAccurately() {
+        assertEquals(
+            CloudSyncStatus.SYNCHRONIZATION_FAILED,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = true,
+                    isOnline = true,
+                    backendHealth = BackendHealth.REACHABLE,
+                    lastError = null
+                ),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = "cmp_1",
+                persistedLastSyncedAt = 1_750_000_000_000L,
+                persistedLastError = "invoice (upsert) [inv_1] (attempt 2): [MISSING_FILE] Signed invoice PDF missing"
+            )
+        )
+        assertEquals(
+            CloudSyncStatus.FULLY_SYNCHRONIZED,
+            SyncStatusResolver.resolve(
+                state = CloudSyncUiState(
+                    firebaseConfigured = true,
+                    isAuthenticated = true,
+                    isOnline = true,
+                    backendHealth = BackendHealth.REACHABLE,
+                    lastSyncedAt = null,
+                    lastError = null
+                ),
+                pendingCount = 0,
+                failedCount = 0,
+                activeCompanyId = "cmp_1",
+                persistedLastSyncedAt = 1_750_000_000_000L,
+                persistedLastError = ""
+            )
+        )
     }
 }

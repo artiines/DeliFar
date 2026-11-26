@@ -1,6 +1,5 @@
 package com.delifar.app.ui.screens
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -13,6 +12,8 @@ import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -56,6 +57,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -64,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -75,14 +78,17 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
+import com.delifar.app.documents.DocumentProcessor
 import com.delifar.app.documents.SignatureStrokePoint
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SignatureCaptureScreen(
     invoiceId: String,
@@ -118,6 +124,10 @@ fun SignatureCaptureScreen(
     var showFinalConfirm by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    val errDrawFirst = lStr(R.string.sig_err_draw_first)
+    val errRecipientName = lStr(R.string.sig_err_recipient_name)
+    val errAckRequired = lStr(R.string.sig_err_ack_required)
 
     Scaffold(
         topBar = {
@@ -170,12 +180,15 @@ fun SignatureCaptureScreen(
 
             if (pages.size > 1) {
                 item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         pages.forEachIndexed { idx, _ ->
                             FilterChip(
                                 selected = idx == selectedPageIdx,
                                 onClick = { selectedPageIdx = idx },
-                                label = { Text("Page ${idx + 1}") }
+                                label = { Text(lStr(R.string.invoice_page_chip, idx + 1)) }
                             )
                         }
                     }
@@ -185,8 +198,13 @@ fun SignatureCaptureScreen(
             // Zoomable, scrollable invoice preview with tappable signature placement box
             if (currentPage != null) {
                 item {
-                    val bmp = remember(currentPage.editedLocalPath) {
-                        BitmapFactory.decodeFile(currentPage.editedLocalPath)?.asImageBitmap()
+                    val bmp by produceState<ImageBitmap?>(
+                        initialValue = null,
+                        key1 = currentPage.editedLocalPath
+                    ) {
+                        value = withContext(Dispatchers.IO) {
+                            DocumentProcessor.decodeScaledBitmap(currentPage.editedLocalPath, 1200)?.asImageBitmap()
+                        }
                     }
                     var boxW by remember { mutableFloatStateOf(1f) }
                     var boxH by remember { mutableFloatStateOf(1f) }
@@ -212,7 +230,7 @@ fun SignatureCaptureScreen(
                     ) {
                         if (bmp != null) {
                             Image(
-                                bitmap = bmp,
+                                bitmap = bmp!!,
                                 contentDescription = "Invoice preview",
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier
@@ -223,6 +241,12 @@ fun SignatureCaptureScreen(
                                         translationX = panOffset.x,
                                         translationY = panOffset.y
                                     )
+                            )
+                        } else {
+                            CircularProgressIndicator(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .align(Alignment.Center)
                             )
                         }
                         // Signature placement indicator
@@ -409,9 +433,9 @@ fun SignatureCaptureScreen(
                 Button(
                     onClick = {
                         when {
-                            strokes.isEmpty() -> errorMsg = "Please collect a handwritten signature first."
-                            recipientName.trim().length < 2 -> errorMsg = "Enter the recipient's full name."
-                            !acknowledged -> errorMsg = "Recipient must confirm delivery acknowledgment."
+                            strokes.isEmpty() -> errorMsg = errDrawFirst
+                            recipientName.trim().length < 2 -> errorMsg = errRecipientName
+                            !acknowledged -> errorMsg = errAckRequired
                             else -> showFinalConfirm = true
                         }
                     },
@@ -459,7 +483,7 @@ fun SignatureCaptureScreen(
                             }
                         }
                     ) {
-                        Text(if (saving) "Generating PDF…" else lStr(R.string.confirm))
+                        Text(if (saving) lStr(R.string.generating_pdf) else lStr(R.string.confirm))
                     }
                 },
                 dismissButton = {

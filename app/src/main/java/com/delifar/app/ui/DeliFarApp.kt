@@ -33,7 +33,10 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.delifar.app.R
+import com.delifar.app.cloud.FirebaseServices
 import com.delifar.app.data.EmployeeRole
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
 import com.delifar.app.ui.components.ProvideAppLocale
@@ -86,6 +89,7 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
     val prefs by viewModel.preferences.collectAsState()
     val company by viewModel.activeCompany.collectAsState()
     val latestDraft by viewModel.latestDraft.collectAsState()
+    val offlineOwnedCompanies by viewModel.offlineOwnedCompanies.collectAsState()
     val syncState by viewModel.syncState.collectAsState()
     val resolvedSyncStatus by viewModel.resolvedSyncStatus.collectAsState()
     val pendingSyncCount by viewModel.pendingSyncCount.collectAsState()
@@ -209,6 +213,7 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
                             companyName = company?.name,
                             hasAccount = prefs.activeUserUid.isNotBlank(),
                             onboardingDismissed = prefs.onboardingDismissed,
+                            offlineCompaniesToClaimCount = if (FirebaseServices.isAuthenticated) offlineOwnedCompanies.size else 0,
                             onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                             onOpenAccount = { navController.navigate(Routes.ACCOUNT) },
                             onOpenTeam = { navController.navigate(Routes.TEAM) },
@@ -223,6 +228,14 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
                             onQuickCompleteJob = { jobId -> viewModel.quickCompleteJob(jobId) },
                             onAddInvoiceForJob = { jobId, storeId ->
                                 navController.navigate("${Routes.INVOICE_CAPTURE}?jobId=$jobId&storeId=$storeId")
+                            },
+                            onLoadJobItems = { jobId ->
+                                withContext(Dispatchers.IO) {
+                                    viewModel.repository.db.jobDao().getJobWithItems(jobId)?.sortedItems.orEmpty()
+                                }
+                            },
+                            onReportIssue = { jobId, issueType, note, keepOpen, actuals, onDone ->
+                                viewModel.reportIssue(jobId, issueType, note, keepOpen, actuals, onDone)
                             },
                             onDismissOnboarding = { viewModel.dismissOnboarding() },
                             onNotify = { msg -> viewModel.notifyMessage(msg) }
@@ -247,12 +260,20 @@ fun DeliFarApp(viewModel: DeliFarViewModel = viewModel()) {
 
                     composable(Routes.SCHEDULE) {
                         ScheduleScreen(
+                            stores = stores,
                             jobRows = jobRows,
                             hasActiveStores = stores.any { !it.store.archived },
                             zoneId = zoneId,
+                            userRole = prefs.activeUserRole,
                             canManage = canManage,
                             onOpenJob = { jobId -> navController.navigate("${Routes.JOB_DETAIL}/$jobId") },
-                            onNewJob = { navController.navigate(Routes.JOB_EDITOR) }
+                            onNewJob = { navController.navigate(Routes.JOB_EDITOR) },
+                            onQuickStartJob = { jobId -> viewModel.quickStartJob(jobId) },
+                            onQuickCompleteJob = { jobId -> viewModel.quickCompleteJob(jobId) },
+                            onAddInvoiceForJob = { jobId, storeId ->
+                                navController.navigate("${Routes.INVOICE_CAPTURE}?jobId=$jobId&storeId=$storeId")
+                            },
+                            onNotify = { msg -> viewModel.notifyMessage(msg) }
                         )
                     }
 

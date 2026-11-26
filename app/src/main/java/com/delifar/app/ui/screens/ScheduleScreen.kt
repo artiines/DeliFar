@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,40 +42,59 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
 import com.delifar.app.data.JobListRow
 import com.delifar.app.data.JobStatus
+import com.delifar.app.data.StoreWithHours
 import com.delifar.app.domain.BusinessRules
+import com.delifar.app.domain.RolePermissions
 import com.delifar.app.ui.components.JobCard
+import com.delifar.app.ui.components.LocalAppLocale
 import com.delifar.app.ui.components.lStr
+import com.delifar.app.ui.components.launchDialer
+import com.delifar.app.ui.components.launchDirections
+import com.delifar.app.ui.components.todayHoursSummary
 import com.delifar.app.ui.components.weekdayShortLabel
 import com.delifar.app.ui.theme.TerracottaError
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 enum class ScheduleMode { DAY, WEEK, OVERDUE, ALL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScheduleScreen(
+    stores: List<StoreWithHours> = emptyList(),
     jobRows: List<JobListRow>,
     hasActiveStores: Boolean,
     zoneId: ZoneId,
+    userRole: String = "",
     canManage: Boolean,
     onOpenJob: (String) -> Unit,
-    onNewJob: () -> Unit
+    onNewJob: () -> Unit,
+    onQuickStartJob: ((String) -> Unit)? = null,
+    onQuickCompleteJob: ((String) -> Unit)? = null,
+    onAddInvoiceForJob: ((String, String) -> Unit)? = null,
+    onNotify: ((String) -> Unit)? = null
 ) {
+    val context = LocalContext.current
+    val appLocale = LocalAppLocale.current
     val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
     var selectedDate by remember(zoneId) { mutableStateOf(today) }
     var mode by remember { mutableStateOf(ScheduleMode.WEEK) }
 
+    val storesById = remember(stores) { stores.associateBy { it.store.id } }
+    val canUpdateJobs = remember(userRole) { userRole.isNotBlank() && RolePermissions.canUpdateAssignedJobs(userRole) }
+    val canUploadInvoices = remember(userRole) { userRole.isNotBlank() && RolePermissions.canUploadAndSignInvoices(userRole) }
+    val invalidCoordMsg = lStr(R.string.invalid_store_coordinates)
+
     val weekDays = remember(selectedDate) { BusinessRules.weekDays(selectedDate) }
     val (weekStart, weekEnd) = remember(selectedDate) { BusinessRules.weekRange(selectedDate) }
-    val monthFmt = remember { DateTimeFormatter.ofPattern("MMM d", Locale.US) }
+    val monthFmt = remember(appLocale) { DateTimeFormatter.ofPattern("MMM d", appLocale) }
 
     val activeCountsByDate = remember(jobRows) {
         jobRows.filter { it.job.status in JobStatus.ACTIVE }.groupingBy { it.job.date }.eachCount()
@@ -209,36 +229,43 @@ fun ScheduleScreen(
                 }
             }
 
-            // Mode filter chips
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 4.dp),
+            // Mode filter chips (horizontally scrollable so RU/HY labels never clip)
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FilterChip(
-                    selected = mode == ScheduleMode.WEEK,
-                    onClick = { mode = ScheduleMode.WEEK },
-                    label = { Text(lStr(R.string.this_week)) }
-                )
-                FilterChip(
-                    selected = mode == ScheduleMode.DAY && selectedDate == today,
-                    onClick = {
-                        selectedDate = today
-                        mode = ScheduleMode.DAY
-                    },
-                    label = { Text(lStr(R.string.today)) }
-                )
-                FilterChip(
-                    selected = mode == ScheduleMode.OVERDUE,
-                    onClick = { mode = ScheduleMode.OVERDUE },
-                    label = { Text(lStr(R.string.overdue)) }
-                )
-                FilterChip(
-                    selected = mode == ScheduleMode.ALL,
-                    onClick = { mode = ScheduleMode.ALL },
-                    label = { Text(lStr(R.string.all)) }
-                )
+                item {
+                    FilterChip(
+                        selected = mode == ScheduleMode.WEEK,
+                        onClick = { mode = ScheduleMode.WEEK },
+                        label = { Text(lStr(R.string.this_week)) }
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = mode == ScheduleMode.DAY && selectedDate == today,
+                        onClick = {
+                            selectedDate = today
+                            mode = ScheduleMode.DAY
+                        },
+                        label = { Text(lStr(R.string.today)) }
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = mode == ScheduleMode.OVERDUE,
+                        onClick = { mode = ScheduleMode.OVERDUE },
+                        label = { Text(lStr(R.string.overdue)) }
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = mode == ScheduleMode.ALL,
+                        onClick = { mode = ScheduleMode.ALL },
+                        label = { Text(lStr(R.string.all)) }
+                    )
+                }
             }
 
             LazyColumn(
@@ -273,7 +300,32 @@ fun ScheduleScreen(
                             )
                         }
                         items(rows, key = { it.job.id }) { row ->
-                            JobCard(row = row, zoneId = zoneId, onClick = { onOpenJob(row.job.id) })
+                            val storeWithHours = storesById[row.job.storeId]
+                            val phone = storeWithHours?.store?.phone.orEmpty()
+                            JobCard(
+                                row = row,
+                                zoneId = zoneId,
+                                onClick = { onOpenJob(row.job.id) },
+                                receivingHoursToday = storeWithHours?.let { todayHoursSummary(it.hours, zoneId) },
+                                storeHours = storeWithHours?.hours.orEmpty(),
+                                onQuickNavigate = {
+                                    val store = storeWithHours?.store
+                                    val lat = store?.lat ?: row.job.snapshotLat
+                                    val lon = store?.lon ?: row.job.snapshotLon
+                                    val ok = launchDirections(context, lat, lon, row.displayStoreName, row.displayStoreAddress)
+                                    if (!ok) onNotify?.invoke(invalidCoordMsg)
+                                },
+                                onQuickCall = if (phone.isNotBlank()) ({ launchDialer(context, phone) }) else null,
+                                onQuickAdvanceStatus = if (canUpdateJobs) {
+                                    {
+                                        if (row.job.status == JobStatus.PROGRESS) onQuickCompleteJob?.invoke(row.job.id)
+                                        else onQuickStartJob?.invoke(row.job.id)
+                                    }
+                                } else null,
+                                onQuickInvoice = if (canUploadInvoices && onAddInvoiceForJob != null) {
+                                    { onAddInvoiceForJob(row.job.id, row.job.storeId) }
+                                } else null
+                            )
                         }
                     }
                 }

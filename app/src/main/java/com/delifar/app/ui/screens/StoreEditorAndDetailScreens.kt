@@ -4,9 +4,12 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -78,11 +81,13 @@ import com.delifar.app.network.GeocodeCandidate
 import com.delifar.app.network.GeocodeSource
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.JobCard
+import com.delifar.app.ui.components.ReceivingWindowStatusTag
 import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.StorePinPickerMap
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.launchDialer
 import com.delifar.app.ui.components.launchDirections
+import com.delifar.app.ui.components.todayHoursSummary
 import com.delifar.app.ui.components.weekdayShortLabel
 import com.delifar.app.ui.theme.AmberAccent
 import com.delifar.app.ui.theme.AmberContainer
@@ -93,7 +98,7 @@ import com.delifar.app.ui.theme.TerracottaError
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun StoreEditorScreen(
     existingStoreId: String?,
@@ -163,6 +168,8 @@ fun StoreEditorScreen(
     val duplicateProviderWarn = lStr(R.string.duplicate_store_warning)
     val duplicateStoreWarn = lStr(R.string.duplicate_manual_store_warning)
     val unconfirmedWarn = lStr(R.string.confirm_location_required)
+    val locateNotFoundMsg = lStr(R.string.locate_not_found)
+    val copiedWeekdaysMsg = lStr(R.string.copied_weekdays_msg)
 
     fun applyCandidate(candidate: GeocodeCandidate, allowFillBlankName: Boolean) {
         // NEVER overwrite a custom store name the user already typed!
@@ -281,8 +288,7 @@ fun StoreEditorScreen(
                                         // Preview first candidate immediately while letting user pick another if multiple
                                         applyCandidate(outcome.candidates.first(), allowFillBlankName = false)
                                     } else {
-                                        locateError = outcome.errorMessage
-                                            ?: "Could not find coordinates for this address. Tap the map below to place the pin manually."
+                                        locateError = outcome.errorMessage ?: locateNotFoundMsg
                                     }
                                 }
                             },
@@ -594,11 +600,35 @@ fun StoreEditorScreen(
 
             // 4. Receiving Hours
             item {
-                Text(
-                    text = lStr(R.string.receiving_hours),
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(top = 6.dp)
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = lStr(R.string.receiving_hours),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    val monMode = dayModes[1] ?: HoursMode.UNKNOWN
+                    if (monMode != HoursMode.UNKNOWN) {
+                        OutlinedButton(
+                            onClick = {
+                                val monWin = dayWindows[1] ?: ""
+                                (2..5).forEach { d ->
+                                    dayModes[d] = monMode
+                                    dayWindows[d] = monWin
+                                }
+                                viewModel.notifyMessage(copiedWeekdaysMsg)
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier.defaultMinSize(minHeight = 40.dp)
+                        ) {
+                            Text(lStr(R.string.copy_mon_to_weekdays), style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
             }
 
             items((1..7).toList()) { day ->
@@ -615,38 +645,35 @@ fun StoreEditorScreen(
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        Text(
+                            text = weekdayShortLabel(day),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Text(
-                                text = weekdayShortLabel(day),
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
+                            FilterChip(
+                                selected = mode == HoursMode.UNKNOWN,
+                                onClick = { dayModes[day] = HoursMode.UNKNOWN; dayWindows[day] = "" },
+                                label = { Text(lStr(R.string.hours_unknown)) }
                             )
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                FilterChip(
-                                    selected = mode == HoursMode.UNKNOWN,
-                                    onClick = { dayModes[day] = HoursMode.UNKNOWN; dayWindows[day] = "" },
-                                    label = { Text(lStr(R.string.hours_unknown)) }
-                                )
-                                FilterChip(
-                                    selected = mode == HoursMode.CLOSED,
-                                    onClick = { dayModes[day] = HoursMode.CLOSED; dayWindows[day] = "" },
-                                    label = { Text(lStr(R.string.hours_closed)) }
-                                )
-                                FilterChip(
-                                    selected = mode == HoursMode.OPEN,
-                                    onClick = {
-                                        dayModes[day] = HoursMode.OPEN
-                                        if ((dayWindows[day] ?: "").isBlank()) {
-                                            dayWindows[day] = "08:00-16:00"
-                                        }
-                                    },
-                                    label = { Text(lStr(R.string.hours_open)) }
-                                )
-                            }
+                            FilterChip(
+                                selected = mode == HoursMode.CLOSED,
+                                onClick = { dayModes[day] = HoursMode.CLOSED; dayWindows[day] = "" },
+                                label = { Text(lStr(R.string.hours_closed)) }
+                            )
+                            FilterChip(
+                                selected = mode == HoursMode.OPEN,
+                                onClick = {
+                                    dayModes[day] = HoursMode.OPEN
+                                    if ((dayWindows[day] ?: "").isBlank()) {
+                                        dayWindows[day] = "08:00-16:00"
+                                    }
+                                },
+                                label = { Text(lStr(R.string.hours_open)) }
+                            )
                         }
                         if (mode == HoursMode.OPEN) {
                             OutlinedTextField(
@@ -735,13 +762,14 @@ fun StoreEditorScreen(
     }
 }
 
+@Composable
 private fun sourceDisplayLabel(source: String): String = when (source) {
-    GeocodeSource.ANDROID_GEOCODER -> "Android Geocoder"
-    GeocodeSource.OSM_NOMINATIM -> "OpenStreetMap Geocoder"
-    GeocodeSource.PASTED_COORDS -> "Pasted Coordinates"
-    GeocodeSource.GOOGLE_MAPS_LINK -> "Google Maps Share Link"
-    GeocodeSource.MANUAL_PIN -> "Manual Map Pin"
-    else -> "Saved Location"
+    GeocodeSource.ANDROID_GEOCODER -> lStr(R.string.source_android_geocoder)
+    GeocodeSource.OSM_NOMINATIM -> lStr(R.string.source_osm_nominatim)
+    GeocodeSource.PASTED_COORDS -> lStr(R.string.source_pasted_coords)
+    GeocodeSource.GOOGLE_MAPS_LINK -> lStr(R.string.source_google_maps_link)
+    GeocodeSource.MANUAL_PIN -> lStr(R.string.source_manual_pin)
+    else -> lStr(R.string.source_saved_location)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -765,6 +793,7 @@ fun StoreDetailScreen(
     }
     val archiveBlockedMsg = lStr(R.string.archive_blocked_active_jobs)
     val invalidCoordMsg = lStr(R.string.invalid_store_coordinates)
+    val reviewPinMsg = lStr(R.string.map_review_pin_before_nav)
 
     Scaffold(
         topBar = {
@@ -850,21 +879,24 @@ fun StoreDetailScreen(
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
-                                        text = "Pin Review Required",
+                                        text = lStr(R.string.pin_review_required),
                                         style = MaterialTheme.typography.labelLarge,
                                         color = AmberAccent,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "This store has unverified legacy coordinates. Confirm the pin on the map before starting turn-by-turn navigation.",
+                                        text = lStr(R.string.pin_review_body),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                     if (canManage) {
-                                        Button(onClick = { onEditStore(swh.store.id) }) {
+                                        Button(
+                                            onClick = { onEditStore(swh.store.id) },
+                                            modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                        ) {
                                             Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
                                             Spacer(Modifier.width(6.dp))
-                                            Text("Review & Confirm Pin")
+                                            Text(lStr(R.string.review_confirm_pin))
                                         }
                                     }
                                 }
@@ -875,7 +907,7 @@ fun StoreDetailScreen(
                             OutlinedButton(
                                 onClick = {
                                     if (!swh.store.locationConfirmed) {
-                                        viewModel.notifyMessage("Please review and confirm this store's pin before navigating.")
+                                        viewModel.notifyMessage(reviewPinMsg)
                                         if (canManage) onEditStore(swh.store.id)
                                     } else {
                                         val ok = launchDirections(
@@ -888,7 +920,9 @@ fun StoreDetailScreen(
                                         if (!ok) viewModel.notifyMessage(invalidCoordMsg)
                                     }
                                 },
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 44.dp)
                             ) {
                                 Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
@@ -897,7 +931,9 @@ fun StoreDetailScreen(
                             if (swh.store.phone.isNotBlank()) {
                                 OutlinedButton(
                                     onClick = { launchDialer(context, swh.store.phone) },
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 44.dp)
                                 ) {
                                     Icon(Icons.Default.Call, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(6.dp))
@@ -950,7 +986,14 @@ fun StoreDetailScreen(
                         modifier = Modifier.padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(lStr(R.string.receiving_hours), style = MaterialTheme.typography.titleMedium)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(lStr(R.string.receiving_hours), style = MaterialTheme.typography.titleMedium)
+                            ReceivingWindowStatusTag(hours = swh.hours, zoneId = zoneId)
+                        }
                         (1..7).forEach { day ->
                             val entry = swh.hours.find { it.day == day }
                             val text = when (entry?.mode) {
@@ -978,7 +1021,13 @@ fun StoreDetailScreen(
                 )
             }
             items(storeJobs, key = { it.job.id }) { row ->
-                JobCard(row = row, zoneId = zoneId, onClick = { onOpenJob(row.job.id) })
+                JobCard(
+                    row = row,
+                    zoneId = zoneId,
+                    onClick = { onOpenJob(row.job.id) },
+                    receivingHoursToday = todayHoursSummary(swh.hours, zoneId),
+                    storeHours = swh.hours
+                )
             }
         }
     }

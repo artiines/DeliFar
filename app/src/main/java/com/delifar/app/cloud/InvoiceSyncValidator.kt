@@ -1,10 +1,48 @@
 package com.delifar.app.cloud
 
+import com.delifar.app.data.InvoiceEntity
+import com.delifar.app.data.InvoiceStatus
 import com.delifar.app.data.InvoiceWithPages
 import com.delifar.app.domain.BusinessRules
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
+
+data class RemoteInvoiceSnapshot(
+    val documentId: String,
+    val id: String,
+    val companyId: String,
+    val storeId: String,
+    val invoiceNumber: String,
+    val version: Int,
+    val status: String,
+    val signed: Boolean,
+    val recipientName: String,
+    val signatureStoragePath: String?,
+    val signedPdfStoragePath: String?,
+    val signedPdfSha256: String?,
+    val signedServerAtMillis: Long?
+)
+
+interface InvoiceMetadataGateway {
+    suspend fun fetchInvoiceFromServer(companyId: String, invoiceId: String): RemoteInvoiceSnapshot?
+    suspend fun createInvoice(companyId: String, invoiceId: String, payload: Map<String, Any?>)
+    suspend fun mergeUnsignedInvoice(companyId: String, invoiceId: String, payload: Map<String, Any?>)
+    suspend fun updateSignedInvoiceFields(companyId: String, invoiceId: String, fields: Map<String, Any?>)
+}
+
+enum class InvoiceMetadataUploadResolution {
+    CREATED,
+    MERGED_UNSIGNED,
+    FINALIZED_SIGNED,
+    VOIDED_SIGNED,
+    ALREADY_SYNCED_VERIFIED
+}
+
+data class InvoiceMetadataUploadResult(
+    val resolution: InvoiceMetadataUploadResolution,
+    val signedServerAtMillis: Long?
+)
 
 enum class InvoiceUploadErrorCode {
     MISSING_FILE,
@@ -152,7 +190,149 @@ object InvoiceSyncValidator {
                     "Signed PDF has not finished uploading for invoice #${inv.invoiceNumber}."
                 )
             }
+            if (inv.signedPdfSha256.isNullOrBlank()) {
+                throw InvoiceUploadException(
+                    InvoiceUploadErrorCode.CHECKSUM_MISMATCH,
+                    "Signed PDF SHA-256 digest is missing for invoice #${inv.invoiceNumber}."
+                )
+            }
         }
+    }
+
+    fun matchesImmutableSignedInvoice(local: InvoiceEntity, remote: RemoteInvoiceSnapshot): Boolean {
+        return remote.documentId == local.id &&
+            remote.id == local.id &&
+            remote.signed &&
+            remote.companyId == local.companyId &&
+            remote.storeId == local.storeId &&
+            remote.invoiceNumber == local.invoiceNumber &&
+            remote.version == local.version &&
+            remote.recipientName == local.recipientName &&
+            !remote.signatureStoragePath.isNullOrBlank() &&
+            remote.signatureStoragePath == local.signatureStoragePath &&
+            !remote.signedPdfStoragePath.isNullOrBlank() &&
+            remote.signedPdfStoragePath == local.signedPdfStoragePath &&
+            !remote.signedPdfSha256.isNullOrBlank() &&
+            remote.signedPdfSha256.equals(local.signedPdfSha256, ignoreCase = true)
+    }
+
+    suspend fun uploadInvoiceMetadataIdempotently(
+        iwp: InvoiceWithPages,
+        finalStatus: String,
+        wasRetry: Boolean,
+        gateway: InvoiceMetadataGateway,
+        buildFullPayload: (InvoiceWithPages, String) -> Map<String, Any?>,
+        serverTimestampValue: Any
+    ): InvoiceMetadataUploadResult {
+        val inv = iwp.invoice
+        assertInvoiceReadyForMetadataSync(iwp)
+
+        suspend fun reconcileSignedRemote(remoteSnap: RemoteInvoiceSnapshot): InvoiceMetadataUploadResult {
+            if (!matchesImmutableSignedInvoice(inv, remoteSnap)) {
+                throw IllegalStateException(
+                    "Signed invoice #${inv.invoiceNumber} (v${inv.version}) on server has mismatched immutable fields."
+                )
+            }
+            if (inv.status == InvoiceStatus.VOIDED) {
+                if (remoteSnap.status != InvoiceStatus.VOIDED) {
+                    gateway.updateSignedInvoiceFields(
+                        inv.companyId,
+                        inv.id,
+                        mapOf(
+                            "status" to InvoiceStatus.VOIDED,
+                            "voidedReason" to (inv.voidedReason?.ifBlank { "Voided" } ?: "Voided"),
+                            "modifiedAt" to inv.modifiedAt,
+                            "serverUpdatedAt" to serverTimestampValue
+                        )
+                    )
+                }
+                return InvoiceMetadataUploadResult(
+                    resolution = InvoiceMetadataUploadResolution.VOIDED_SIGNED,
+                    signedServerAtMillis = remoteSnap.signedServerAtMillis
+                )
+            }
+            if (finalStatus == InvoiceStatus.SYNCHRONIZED) {
+                when (remoteSnap.status) {
+                    InvoiceStatus.SYNCHRONIZED -> return InvoiceMetadataUploadResult(
+                        resolution = InvoiceMetadataUploadResolution.ALREADY_SYNCED_VERIFIED,
+                        signedServerAtMillis = remoteSnap.signedServerAtMillis
+                    )
+                    InvoiceStatus.SIGNED,
+                    InvoiceStatus.PENDING_UPLOAD,
+                    InvoiceStatus.UPLOAD_FAILED -> {
+                        val finalizeFields = mutableMapOf<String, Any?>(
+                            "status" to InvoiceStatus.SYNCHRONIZED,
+                            "modifiedAt" to inv.modifiedAt,
+                            "serverUpdatedAt" to serverTimestampValue
+                        )
+                        if (remoteSnap.signedServerAtMillis == null) {
+                            finalizeFields["signedServerAt"] = serverTimestampValue
+                        }
+                        gateway.updateSignedInvoiceFields(inv.companyId, inv.id, finalizeFields)
+                        return InvoiceMetadataUploadResult(
+                            resolution = InvoiceMetadataUploadResolution.FINALIZED_SIGNED,
+                            signedServerAtMillis = remoteSnap.signedServerAtMillis
+                        )
+                    }
+                    InvoiceStatus.VOIDED -> {
+                        throw IllegalStateException(
+                            "Signed invoice #${inv.invoiceNumber} (v${inv.version}) is already voided on server."
+                        )
+                    }
+                }
+            }
+            return InvoiceMetadataUploadResult(
+                resolution = InvoiceMetadataUploadResolution.ALREADY_SYNCED_VERIFIED,
+                signedServerAtMillis = remoteSnap.signedServerAtMillis
+            )
+        }
+
+        val preFetched = if (wasRetry || inv.signed) {
+            runCatching { gateway.fetchInvoiceFromServer(inv.companyId, inv.id) }.getOrNull()
+        } else null
+
+        if (preFetched != null) {
+            return if (preFetched.signed) {
+                reconcileSignedRemote(preFetched)
+            } else {
+                gateway.mergeUnsignedInvoice(inv.companyId, inv.id, buildFullPayload(iwp, finalStatus))
+                InvoiceMetadataUploadResult(
+                    resolution = InvoiceMetadataUploadResolution.MERGED_UNSIGNED,
+                    signedServerAtMillis = null
+                )
+            }
+        }
+
+        return try {
+            gateway.createInvoice(inv.companyId, inv.id, buildFullPayload(iwp, finalStatus))
+            InvoiceMetadataUploadResult(
+                resolution = InvoiceMetadataUploadResolution.CREATED,
+                signedServerAtMillis = null
+            )
+        } catch (err: Exception) {
+            if (inv.signed && IdempotentAuditUploader.isPermissionDeniedOrAlreadyExists(err)) {
+                val existingRemote = runCatching { gateway.fetchInvoiceFromServer(inv.companyId, inv.id) }.getOrNull()
+                if (existingRemote != null && existingRemote.signed) {
+                    return reconcileSignedRemote(existingRemote)
+                }
+            }
+            throw err
+        }
+    }
+
+    /**
+     * Resolves the local file path, MIME type, and Storage file extension for an invoice page's
+     * edited scan consistently across local diagnostics and Cloud Storage uploads.
+     */
+    fun resolveEditedAttachmentSource(page: com.delifar.app.data.InvoicePageEntity): Triple<String, String, String> {
+        val editedPath = if (page.editedLocalPath.isBlank() && page.editedSha256.isBlank()) {
+            page.originalLocalPath
+        } else {
+            page.editedLocalPath
+        }
+        val mime = if (editedPath.endsWith(".png", ignoreCase = true)) "image/png" else "image/jpeg"
+        val ext = if (mime == "image/png") "png" else "jpg"
+        return Triple(editedPath, mime, ext)
     }
 
     /**
@@ -182,13 +362,13 @@ object InvoiceSyncValidator {
                 }
             }
             if (page.editedStoragePath.isNullOrBlank()) {
-                val editedPath = page.editedLocalPath?.ifBlank { null } ?: page.originalLocalPath
+                val (editedPath, editedMime, _) = resolveEditedAttachmentSource(page)
                 runCatching {
                     validateLocalAttachment(
                         localPath = editedPath,
                         label = "Page $pageNum scan image",
-                        expectedMimeType = page.mimeType.ifBlank { "image/jpeg" },
-                        expectedSha256 = page.editedSha256?.ifBlank { null }
+                        expectedMimeType = editedMime,
+                        expectedSha256 = page.editedSha256.ifBlank { null }
                     )
                 }.onFailure { err ->
                     issues += (err.message ?: "Page $pageNum scan image is missing or unreadable.")

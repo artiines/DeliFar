@@ -2,7 +2,6 @@ package com.delifar.app.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -12,9 +11,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,7 +41,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -52,16 +57,19 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -75,11 +83,13 @@ import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun InvoiceCaptureScreen(
     jobId: String?,
@@ -94,9 +104,19 @@ fun InvoiceCaptureScreen(
     val scope = rememberCoroutineScope()
 
     val draftInvoiceId = remember { UUID.randomUUID().toString() }
-    val selectedStore = remember(stores, storeIdArg) {
-        stores.find { it.store.id == storeIdArg } ?: stores.firstOrNull { !it.store.archived }
+    val activeStores = remember(stores) { stores.filter { !it.store.archived } }
+    var selectedStoreId by remember(storeIdArg) {
+        mutableStateOf(storeIdArg ?: activeStores.firstOrNull()?.store?.id.orEmpty())
     }
+    LaunchedEffect(activeStores) {
+        if (selectedStoreId.isBlank() && activeStores.isNotEmpty()) {
+            selectedStoreId = storeIdArg ?: activeStores.first().store.id
+        }
+    }
+    val selectedStore = remember(stores, selectedStoreId) {
+        stores.find { it.store.id == selectedStoreId } ?: activeStores.firstOrNull()
+    }
+    var storeDropdownExpanded by remember { mutableStateOf(false) }
 
     var invoiceNumber by remember { mutableStateOf("INV-${(System.currentTimeMillis() % 100000)}") }
     var notes by remember { mutableStateOf("") }
@@ -107,21 +127,33 @@ fun InvoiceCaptureScreen(
     var errorMsg by remember { mutableStateOf<String?>(null) }
 
     var pendingCameraFile by remember { mutableStateOf<File?>(null) }
+    var retakeReplaceIndex by remember { mutableStateOf<Int?>(null) }
+
+    val cameraPermMsg = lStr(R.string.camera_permission_required)
+    val selectStoreMsg = lStr(R.string.select_or_create_store_first)
 
     val takePictureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture()
     ) { success ->
         val file = pendingCameraFile
+        val replaceIdx = retakeReplaceIndex
         pendingCameraFile = null
+        retakeReplaceIndex = null
         if (success && file != null && file.exists()) {
             processing = true
             scope.launch {
-                val res = DocumentProcessor.importCapturedFile(context, draftInvoiceId, pages.size, file)
+                val targetIndex = replaceIdx ?: pages.size
+                val res = DocumentProcessor.importCapturedFile(context, draftInvoiceId, targetIndex, file)
                 processing = false
                 res.fold(
                     onSuccess = { page ->
-                        pages.add(page)
-                        selectedPageIdx = pages.lastIndex
+                        if (replaceIdx != null && replaceIdx in pages.indices) {
+                            pages[replaceIdx] = page.copy(pageIndex = replaceIdx)
+                            selectedPageIdx = replaceIdx
+                        } else {
+                            pages.add(page)
+                            selectedPageIdx = pages.lastIndex
+                        }
                         previewVersion++
                     },
                     onFailure = { errorMsg = it.message ?: "Failed to process photo." }
@@ -138,7 +170,8 @@ fun InvoiceCaptureScreen(
             pendingCameraFile = file
             takePictureLauncher.launch(uri)
         } else {
-            errorMsg = "Camera permission is required to photograph invoices."
+            retakeReplaceIndex = null
+            errorMsg = cameraPermMsg
         }
     }
 
@@ -213,24 +246,82 @@ fun InvoiceCaptureScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // Store selector (editable when opened from Invoices tab)
+            if (activeStores.isNotEmpty()) {
+                item {
+                    if (storeIdArg != null && selectedStore != null) {
+                        OutlinedTextField(
+                            value = selectedStore.store.name,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text(lStr(R.string.select_store)) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        ExposedDropdownMenuBox(
+                            expanded = storeDropdownExpanded,
+                            onExpandedChange = { storeDropdownExpanded = it }
+                        ) {
+                            OutlinedTextField(
+                                value = selectedStore?.store?.name.orEmpty(),
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text(lStr(R.string.select_store)) },
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = storeDropdownExpanded) },
+                                modifier = Modifier
+                                    .menuAnchor()
+                                    .fillMaxWidth()
+                            )
+                            ExposedDropdownMenu(
+                                expanded = storeDropdownExpanded,
+                                onDismissRequest = { storeDropdownExpanded = false }
+                            ) {
+                                activeStores.forEach { swh ->
+                                    DropdownMenuItem(
+                                        text = { Text(swh.store.name) },
+                                        onClick = {
+                                            selectedStoreId = swh.store.id
+                                            storeDropdownExpanded = false
+                                            errorMsg = null
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Capture source buttons
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = { launchCamera() }, modifier = Modifier.weight(1f)) {
+                    Button(
+                        onClick = { retakeReplaceIndex = null; launchCamera() },
+                        modifier = Modifier
+                            .weight(1f)
+                            .defaultMinSize(minHeight = 48.dp)
+                    ) {
                         Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(lStr(R.string.capture_photo))
+                        Text(lStr(R.string.capture_photo), maxLines = 1)
                     }
-                    OutlinedButton(onClick = { galleryLauncher.launch("image/*") }, modifier = Modifier.weight(1f)) {
+                    OutlinedButton(
+                        onClick = { galleryLauncher.launch("image/*") },
+                        modifier = Modifier
+                            .weight(1f)
+                            .defaultMinSize(minHeight = 48.dp)
+                    ) {
                         Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(lStr(R.string.pick_gallery))
+                        Text(lStr(R.string.pick_gallery), maxLines = 1)
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = { pdfLauncher.launch(arrayOf("application/pdf")) },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 44.dp)
                 ) {
                     Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
@@ -242,7 +333,7 @@ fun InvoiceCaptureScreen(
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        Text("Processing invoice page…", style = MaterialTheme.typography.bodyMedium)
+                        Text(lStr(R.string.invoice_processing_page), style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             }
@@ -250,8 +341,14 @@ fun InvoiceCaptureScreen(
             // Document Preview & Non-Destructive Adjustment Controls
             if (currentPage != null) {
                 item {
-                    val bmp = remember(currentPage.editedLocalPath, previewVersion) {
-                        BitmapFactory.decodeFile(currentPage.editedLocalPath)?.asImageBitmap()
+                    val bmp by produceState<ImageBitmap?>(
+                        initialValue = null,
+                        key1 = currentPage.editedLocalPath,
+                        key2 = previewVersion
+                    ) {
+                        value = withContext(Dispatchers.IO) {
+                            DocumentProcessor.decodeScaledBitmap(currentPage.editedLocalPath, 1200)?.asImageBitmap()
+                        }
                     }
                     Card(
                         shape = RoundedCornerShape(14.dp),
@@ -260,13 +357,13 @@ fun InvoiceCaptureScreen(
                     ) {
                         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Text(
-                                "Page ${selectedPageIdx + 1} of ${pages.size} (Untouched original preserved separately)",
+                                lStr(R.string.invoice_page_of, selectedPageIdx + 1, pages.size),
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             if (bmp != null) {
                                 Image(
-                                    bitmap = bmp,
+                                    bitmap = bmp!!,
                                     contentDescription = "Invoice page preview",
                                     contentScale = ContentScale.Fit,
                                     modifier = Modifier
@@ -275,10 +372,22 @@ fun InvoiceCaptureScreen(
                                         .clip(RoundedCornerShape(10.dp))
                                         .background(MaterialTheme.colorScheme.surfaceVariant)
                                 )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(220.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                                }
                             }
-                            Row(
+                            FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 FilterChip(
                                     selected = currentPage.rotationDegrees != 0,
@@ -347,17 +456,22 @@ fun InvoiceCaptureScreen(
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(onClick = {
-                                    pages.removeAt(selectedPageIdx)
-                                    selectedPageIdx = selectedPageIdx.coerceAtMost((pages.size - 1).coerceAtLeast(0))
-                                    launchCamera()
-                                }) {
+                                OutlinedButton(
+                                    onClick = {
+                                        retakeReplaceIndex = selectedPageIdx
+                                        launchCamera()
+                                    },
+                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                ) {
                                     Text(lStr(R.string.retake))
                                 }
-                                OutlinedButton(onClick = {
-                                    pages.removeAt(selectedPageIdx)
-                                    selectedPageIdx = selectedPageIdx.coerceAtMost((pages.size - 1).coerceAtLeast(0))
-                                }) {
+                                OutlinedButton(
+                                    onClick = {
+                                        pages.removeAt(selectedPageIdx)
+                                        selectedPageIdx = selectedPageIdx.coerceAtMost((pages.size - 1).coerceAtLeast(0))
+                                    },
+                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                ) {
                                     Icon(Icons.Default.Delete, contentDescription = null, tint = TerracottaError, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(4.dp))
                                     Text(lStr(R.string.delete), color = TerracottaError)
@@ -376,12 +490,14 @@ fun InvoiceCaptureScreen(
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
                                 color = if (idx == selectedPageIdx) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                                modifier = Modifier.clickable { selectedPageIdx = idx }
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 44.dp)
+                                    .clickable { selectedPageIdx = idx }
                             ) {
                                 Text(
-                                    text = "Page ${idx + 1}",
+                                    text = lStr(R.string.invoice_page_chip, idx + 1),
                                     color = if (idx == selectedPageIdx) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
                                 )
                             }
                         }
@@ -423,7 +539,7 @@ fun InvoiceCaptureScreen(
                     Button(
                         onClick = {
                             if (store == null) {
-                                errorMsg = "Select or create a store first."
+                                errorMsg = selectStoreMsg
                                 return@Button
                             }
                             scope.launch {
@@ -453,7 +569,7 @@ fun InvoiceCaptureScreen(
                     OutlinedButton(
                         onClick = {
                             if (store == null) {
-                                errorMsg = "Select or create a store first."
+                                errorMsg = selectStoreMsg
                                 return@OutlinedButton
                             }
                             scope.launch {
@@ -472,7 +588,9 @@ fun InvoiceCaptureScreen(
                             }
                         },
                         enabled = pages.isNotEmpty() && !processing,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
                     ) {
                         Text(lStr(R.string.save_invoice))
                     }

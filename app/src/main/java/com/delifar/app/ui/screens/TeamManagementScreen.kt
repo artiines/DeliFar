@@ -3,12 +3,14 @@ package com.delifar.app.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -64,7 +66,7 @@ import kotlinx.coroutines.launch
 
 private enum class TeamTab { EMPLOYEES, INVITES, ACTIVITY }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun TeamManagementScreen(
     viewModel: DeliFarViewModel,
@@ -119,13 +121,16 @@ fun TeamManagementScreen(
                         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
                     ) {
                         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text("No company linked yet", style = MaterialTheme.typography.titleMedium)
+                            Text(lStr(R.string.no_company_linked_title), style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "Register your company as Owner or join an existing team with an invite code to unlock multi-user real-time sync.",
+                                lStr(R.string.no_company_linked_body),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            Button(onClick = onOpenAccount) {
+                            Button(
+                                onClick = onOpenAccount,
+                                modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                            ) {
                                 Text(lStr(R.string.account_and_company))
                             }
                         }
@@ -151,10 +156,10 @@ fun TeamManagementScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(c.name, style = MaterialTheme.typography.titleLarge)
                                 Text(
-                                    "Timezone: ${c.timezone} • ${employees.count { it.active }} active member(s)",
+                                    lStr(R.string.active_members_count, c.timezone, employees.count { it.active }),
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -162,21 +167,30 @@ fun TeamManagementScreen(
                             RoleBadge(role = prefs.activeUserRole)
                         }
                         Text(
-                            text = "Document Storage: %.1f MB / %.0f MB".format(usedMb, quotaMb),
+                            text = lStr(R.string.storage_usage_label, usedMb, quotaMb),
                             style = MaterialTheme.typography.labelMedium
                         )
                         LinearProgressIndicator(
                             progress = { progress },
                             modifier = Modifier.fillMaxWidth()
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             if (isOwner) {
-                                Button(onClick = { showInviteDialog = true }) {
+                                Button(
+                                    onClick = { showInviteDialog = true },
+                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                ) {
                                     Icon(Icons.Default.PersonAdd, contentDescription = null)
                                     Spacer(Modifier.width(6.dp))
                                     Text(lStr(R.string.invite_employee))
                                 }
-                                OutlinedButton(onClick = { viewModel.checkUnmigratedLocalData(); onOpenAccount() }) {
+                                OutlinedButton(
+                                    onClick = { viewModel.checkUnmigratedLocalData(); onOpenAccount() },
+                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                ) {
                                     Icon(Icons.Default.CloudUpload, contentDescription = null)
                                     Spacer(Modifier.width(6.dp))
                                     Text(lStr(R.string.migrate_local_data))
@@ -187,9 +201,12 @@ fun TeamManagementScreen(
                 }
             }
 
-            // Tab selector
+            // Tab selector (FlowRow so RU/HY labels wrap cleanly)
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     FilterChip(
                         selected = selectedTab == TeamTab.EMPLOYEES,
                         onClick = { selectedTab = TeamTab.EMPLOYEES },
@@ -241,7 +258,11 @@ fun TeamManagementScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        FlowRow(
+                                            modifier = Modifier.weight(1f),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
                                             listOf(EmployeeRole.MANAGER, EmployeeRole.DRIVER, EmployeeRole.ACCOUNTANT).forEach { r ->
                                                 FilterChip(
                                                     selected = emp.role == r,
@@ -250,7 +271,10 @@ fun TeamManagementScreen(
                                                 )
                                             }
                                         }
-                                        TextButton(onClick = { viewModel.setEmployeeActive(emp.uid, !emp.active) }) {
+                                        TextButton(
+                                            onClick = { viewModel.setEmployeeActive(emp.uid, !emp.active) },
+                                            modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                        ) {
                                             Text(
                                                 if (emp.active) lStr(R.string.deactivate) else lStr(R.string.activate),
                                                 color = if (emp.active) TerracottaError else SuccessGreen
@@ -266,7 +290,7 @@ fun TeamManagementScreen(
                 TeamTab.INVITES -> {
                     if (invitations.isEmpty()) {
                         item {
-                            Text("No invitations sent yet.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(lStr(R.string.no_invitations_yet), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     } else {
                         items(invitations, key = { it.id }) { inv ->
@@ -285,14 +309,17 @@ fun TeamManagementScreen(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(inv.email, style = MaterialTheme.typography.titleMedium)
                                         Text(
-                                            "Code: ${inv.inviteCode} • ${roleLabel(inv.role)} • ${inv.status}",
+                                            lStr(R.string.invite_code_summary, inv.inviteCode, roleLabel(inv.role), inv.status),
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.primary,
                                             fontWeight = FontWeight.SemiBold
                                         )
                                     }
                                     if (isOwner && inv.status == InviteStatus.PENDING) {
-                                        TextButton(onClick = { viewModel.revokeInvitation(inv.id) }) {
+                                        TextButton(
+                                            onClick = { viewModel.revokeInvitation(inv.id) },
+                                            modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                        ) {
                                             Text(lStr(R.string.revoke), color = TerracottaError)
                                         }
                                     }
@@ -305,7 +332,7 @@ fun TeamManagementScreen(
                 TeamTab.ACTIVITY -> {
                     if (auditLogs.isEmpty()) {
                         item {
-                            Text("No activity logged yet.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(lStr(R.string.no_activity_yet), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     } else {
                         items(auditLogs, key = { it.id }) { log ->
@@ -328,7 +355,7 @@ fun TeamManagementScreen(
                                     }
                                     Text(log.summary, style = MaterialTheme.typography.bodyMedium)
                                     Text(
-                                        "By ${log.actorName} (${log.actorRole})",
+                                        lStr(R.string.audit_actor_label, log.actorName, roleLabel(log.actorRole)),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -358,7 +385,10 @@ fun TeamManagementScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         listOf(EmployeeRole.MANAGER, EmployeeRole.DRIVER, EmployeeRole.ACCOUNTANT).forEach { r ->
                             FilterChip(
                                 selected = inviteRole == r,

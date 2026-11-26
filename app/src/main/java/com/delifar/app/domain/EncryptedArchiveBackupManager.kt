@@ -815,12 +815,16 @@ class EncryptedArchiveBackupManager(private val db: DeliFarDatabase) {
                             companyId = targetCompanyId,
                             signatureLocalPath = incoming.invoice.signatureLocalPath?.let { resolvedPaths[it] ?: it },
                             signedPdfLocalPath = incoming.invoice.signedPdfLocalPath?.let { resolvedPaths[it] ?: it },
+                            signatureStoragePath = if (isCrossCompany) null else incoming.invoice.signatureStoragePath,
+                            signedPdfStoragePath = if (isCrossCompany) null else incoming.invoice.signedPdfStoragePath,
                             syncState = SyncState.PENDING
                         )
                         val mappedPages = incoming.sortedPages.map { pg ->
                             pg.copy(
                                 originalLocalPath = resolvedPaths[pg.originalLocalPath] ?: pg.originalLocalPath,
-                                editedLocalPath = resolvedPaths[pg.editedLocalPath] ?: pg.editedLocalPath
+                                editedLocalPath = resolvedPaths[pg.editedLocalPath] ?: pg.editedLocalPath,
+                                originalStoragePath = if (isCrossCompany) null else pg.originalStoragePath,
+                                editedStoragePath = if (isCrossCompany) null else pg.editedStoragePath
                             )
                         }
                         invoicesToWrite += InvoiceWithPages(mappedInv, mappedPages)

@@ -49,6 +49,7 @@ import com.delifar.app.R
 import com.delifar.app.data.JobListRow
 import com.delifar.app.data.JobStatus
 import com.delifar.app.data.StoreWithHours
+import com.delifar.app.ui.components.ReceivingWindowStatusTag
 import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.lStr
 import com.delifar.app.ui.components.launchDialer
@@ -189,7 +190,7 @@ fun StoresScreen(
                                     if (!swh.store.locationConfirmed) {
                                         Spacer(Modifier.width(6.dp))
                                         StatusTag(
-                                            text = "Review Pin",
+                                            text = lStr(R.string.map_review_pin),
                                             bg = AmberContainer,
                                             fg = AmberAccent
                                         )
@@ -209,32 +210,37 @@ fun StoresScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
                                         Icon(
                                             imageVector = Icons.Default.Schedule,
                                             contentDescription = null,
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                             modifier = Modifier.size(15.dp)
                                         )
-                                        Spacer(Modifier.width(5.dp))
                                         Text(
                                             text = todayHoursSummary(swh.hours, zoneId),
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
                                         )
+                                        ReceivingWindowStatusTag(hours = swh.hours, zoneId = zoneId)
                                     }
                                     Row {
                                         if (swh.store.phone.isNotBlank()) {
                                             IconButton(
                                                 onClick = { launchDialer(context, swh.store.phone) },
-                                                modifier = Modifier.size(36.dp)
+                                                modifier = Modifier.size(44.dp)
                                             ) {
                                                 Icon(
                                                     Icons.Default.Call,
                                                     contentDescription = lStr(R.string.call_store),
-                                                    modifier = Modifier.size(18.dp)
+                                                    modifier = Modifier.size(20.dp)
                                                 )
                                             }
                                         }
@@ -252,13 +258,13 @@ fun StoresScreen(
                                                     )
                                                 }
                                             },
-                                            modifier = Modifier.size(36.dp)
+                                            modifier = Modifier.size(44.dp)
                                         ) {
                                             Icon(
                                                 Icons.Default.Directions,
                                                 contentDescription = lStr(R.string.directions),
                                                 tint = if (swh.store.locationConfirmed) MaterialTheme.colorScheme.onSurface else AmberAccent,
-                                                modifier = Modifier.size(18.dp)
+                                                modifier = Modifier.size(20.dp)
                                             )
                                         }
                                     }

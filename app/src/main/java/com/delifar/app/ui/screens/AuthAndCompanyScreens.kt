@@ -3,14 +3,15 @@ package com.delifar.app.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -39,6 +40,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +55,7 @@ import com.delifar.app.cloud.FirebaseServices
 import com.delifar.app.data.EmployeeRole
 import com.delifar.app.data.SearchArea
 import com.delifar.app.domain.BusinessRules
+import com.delifar.app.domain.RolePermissions
 import com.delifar.app.ui.DeliFarViewModel
 import com.delifar.app.ui.components.RoleBadge
 import com.delifar.app.ui.components.StatusTag
@@ -68,7 +71,7 @@ import kotlinx.coroutines.launch
 
 private enum class AuthTab { ACCOUNT, REGISTER_COMPANY, JOIN_INVITE }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AccountAndCompanyScreen(
     viewModel: DeliFarViewModel,
@@ -93,16 +96,30 @@ fun AccountAndCompanyScreen(
     var email by remember { mutableStateOf(prefs.activeUserEmail) }
     var password by remember { mutableStateOf("") }
 
-    // Register company form
+    // Register / edit company form
     var companyName by remember { mutableStateOf(company?.name.orEmpty()) }
     var timezone by remember { mutableStateOf(prefs.companyTimezone) }
     var tzDropdown by remember { mutableStateOf(false) }
     var defaultArea by remember { mutableStateOf(prefs.area) }
 
+    LaunchedEffect(prefs.activeUserName, prefs.activeUserEmail) {
+        if (fullName.isBlank() && prefs.activeUserName.isNotBlank()) fullName = prefs.activeUserName
+        if (email.isBlank() && prefs.activeUserEmail.isNotBlank()) email = prefs.activeUserEmail
+    }
+    LaunchedEffect(company?.id) {
+        val c = company
+        if (c != null) {
+            companyName = c.name
+            timezone = c.timezone
+            defaultArea = c.defaultArea
+        }
+    }
+
     // Join invite form
     var inviteCode by remember { mutableStateOf("") }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    val signedInMsg = lStr(R.string.signed_in_msg)
 
     Scaffold(
         topBar = {
@@ -124,78 +141,6 @@ fun AccountAndCompanyScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Current Session Summary
-            item {
-                val (syncBg, syncFg) = syncStatusColors(resolvedSyncStatus)
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
-                ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                text = prefs.activeUserName.ifBlank { "Offline Operator" },
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            RoleBadge(role = prefs.activeUserRole)
-                        }
-                        if (prefs.activeUserEmail.isNotBlank()) {
-                            Text(prefs.activeUserEmail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Text(
-                            text = if (company != null) "Company: ${company!!.name} (${company!!.timezone})"
-                            else "No active company selected",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        StatusTag(
-                            text = syncStatusLabel(resolvedSyncStatus, pendingSyncCount, failedSyncCount),
-                            bg = syncBg,
-                            fg = syncFg
-                        )
-                        Text(
-                            text = when {
-                                !FirebaseServices.isConfigured ->
-                                    "Offline Mode: Firebase config (google-services.json) is not bundled in this build. All data is stored safely on this device."
-                                !FirebaseServices.isAuthenticated ->
-                                    "Firebase is configured (${FirebaseServices.appCheckProviderName}), but you are not signed in. Sign in below to sync with the cloud."
-                                else ->
-                                    "Signed in as ${FirebaseServices.currentAuthEmail ?: prefs.activeUserEmail} • App Check: ${FirebaseServices.appCheckProviderName}"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        if (company == null) {
-                            Text(
-                                text = "Working Role (Offline / Setup)",
-                                style = MaterialTheme.typography.labelLarge
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                EmployeeRole.ALL.forEach { role ->
-                                    FilterChip(
-                                        selected = prefs.activeUserRole == role,
-                                        onClick = { viewModel.selectOfflineRole(role) },
-                                        label = { Text(roleLabel(role)) }
-                                    )
-                                }
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (company != null) {
-                                Button(onClick = onOpenTeam) {
-                                    Text(lStr(R.string.team_management))
-                                }
-                            }
-                            if (prefs.activeUserUid.isNotBlank() || FirebaseServices.isAuthenticated) {
-                                OutlinedButton(onClick = { viewModel.signOut() }) {
-                                    Text(lStr(R.string.sign_out))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             // Explicit Offline-to-Cloud Company Ownership Transfer Prompt (never silent)
             if (FirebaseServices.isAuthenticated && offlineCompanies.isNotEmpty()) {
                 item {
@@ -214,7 +159,10 @@ fun AccountAndCompanyScreen(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = "You have locally created company data on this device. Confirm below to assign ownership to your signed-in account (${FirebaseServices.currentAuthEmail ?: prefs.activeUserEmail}) without creating duplicate records.",
+                                text = lStr(
+                                    R.string.claim_offline_company_body,
+                                    FirebaseServices.currentAuthEmail ?: prefs.activeUserEmail
+                                ),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -237,10 +185,92 @@ fun AccountAndCompanyScreen(
                                                 busy = false
                                                 res.onFailure { errorMsg = it.message ?: "Could not claim offline company." }
                                             }
-                                        }
+                                        },
+                                        modifier = Modifier.defaultMinSize(minHeight = 44.dp)
                                     ) {
                                         Text(lStr(R.string.claim_offline_company_action))
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Current Session Summary
+            item {
+                val (syncBg, syncFg) = syncStatusColors(resolvedSyncStatus)
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = prefs.activeUserName.ifBlank { lStr(R.string.offline_operator) },
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            RoleBadge(role = prefs.activeUserRole)
+                        }
+                        if (prefs.activeUserEmail.isNotBlank()) {
+                            Text(prefs.activeUserEmail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text(
+                            text = if (company != null) "${company!!.name} (${company!!.timezone})"
+                            else lStr(R.string.no_active_company),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        StatusTag(
+                            text = syncStatusLabel(resolvedSyncStatus, pendingSyncCount, failedSyncCount),
+                            bg = syncBg,
+                            fg = syncFg
+                        )
+                        Text(
+                            text = when {
+                                !FirebaseServices.isConfigured ->
+                                    "Offline Mode: Firebase config (google-services.json) is not bundled in this build. All data is stored safely on this device."
+                                !FirebaseServices.isAuthenticated ->
+                                    "Firebase is configured (${FirebaseServices.appCheckProviderName}), but you are not signed in. Sign in below to sync with the cloud."
+                                else ->
+                                    "Signed in as ${FirebaseServices.currentAuthEmail ?: prefs.activeUserEmail} • App Check: ${FirebaseServices.appCheckProviderName}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (company == null) {
+                            Text(
+                                text = lStr(R.string.working_role_offline),
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                EmployeeRole.ALL.forEach { role ->
+                                    FilterChip(
+                                        selected = prefs.activeUserRole == role,
+                                        onClick = { viewModel.selectOfflineRole(role) },
+                                        label = { Text(roleLabel(role)) }
+                                    )
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (company != null) {
+                                Button(
+                                    onClick = onOpenTeam,
+                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                ) {
+                                    Text(lStr(R.string.team_management))
+                                }
+                            }
+                            if (prefs.activeUserUid.isNotBlank() || FirebaseServices.isAuthenticated) {
+                                OutlinedButton(
+                                    onClick = { viewModel.signOut() },
+                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                ) {
+                                    Text(lStr(R.string.sign_out))
                                 }
                             }
                         }
@@ -270,9 +300,11 @@ fun AccountAndCompanyScreen(
                                         }
                                     },
                                     enabled = !isCurrent,
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .defaultMinSize(minHeight = 44.dp)
                                 ) {
-                                    Text(if (isCurrent) "${comp.name} (Active)" else comp.name)
+                                    Text(if (isCurrent) lStr(R.string.active_badge, comp.name) else comp.name)
                                 }
                             }
                         }
@@ -280,9 +312,12 @@ fun AccountAndCompanyScreen(
                 }
             }
 
-            // Tab selector
+            // Tab selector (FlowRow so RU/HY labels wrap cleanly without clipping)
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     FilterChip(
                         selected = activeTab == AuthTab.ACCOUNT,
                         onClick = { activeTab = AuthTab.ACCOUNT; errorMsg = null },
@@ -374,13 +409,15 @@ fun AccountAndCompanyScreen(
                                             }
                                             busy = false
                                             res.fold(
-                                                onSuccess = { viewModel.notifyMessage("Signed in successfully.") },
+                                                onSuccess = { viewModel.notifyMessage(signedInMsg) },
                                                 onFailure = { errorMsg = it.message ?: "Authentication failed." }
                                             )
                                         }
                                     },
                                     enabled = !busy && email.contains("@") && password.length >= 6,
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .defaultMinSize(minHeight = 48.dp)
                                 ) {
                                     Text(if (isCreateAccount) lStr(R.string.create_account) else lStr(R.string.sign_in))
                                 }
@@ -397,6 +434,13 @@ fun AccountAndCompanyScreen(
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
                         ) {
                             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                if (company != null && RolePermissions.canManageCompany(prefs.activeUserRole)) {
+                                    Text(
+                                        text = lStr(R.string.edit_active_company),
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                                 OutlinedTextField(
                                     value = companyName,
                                     onValueChange = { companyName = it },
@@ -404,20 +448,22 @@ fun AccountAndCompanyScreen(
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth()
                                 )
-                                OutlinedTextField(
-                                    value = fullName,
-                                    onValueChange = { fullName = it },
-                                    label = { Text(lStr(R.string.full_name_label)) },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                OutlinedTextField(
-                                    value = email,
-                                    onValueChange = { email = it },
-                                    label = { Text(lStr(R.string.email_label)) },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
+                                if (company == null || !RolePermissions.canManageCompany(prefs.activeUserRole)) {
+                                    OutlinedTextField(
+                                        value = fullName,
+                                        onValueChange = { fullName = it },
+                                        label = { Text(lStr(R.string.full_name_label)) },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    OutlinedTextField(
+                                        value = email,
+                                        onValueChange = { email = it },
+                                        label = { Text(lStr(R.string.email_label)) },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
                                 ExposedDropdownMenuBox(
                                     expanded = tzDropdown,
                                     onExpandedChange = { tzDropdown = it }
@@ -456,27 +502,78 @@ fun AccountAndCompanyScreen(
                                         label = { Text(lStr(R.string.area_sac)) }
                                     )
                                 }
-                                Button(
-                                    onClick = {
-                                        if (busy) return@Button
-                                        busy = true
-                                        errorMsg = null
-                                        scope.launch {
-                                            val res = viewModel.registerCompany(
-                                                companyName = companyName,
-                                                ownerName = fullName,
-                                                ownerEmail = email,
-                                                timezone = timezone,
-                                                defaultArea = defaultArea
-                                            )
-                                            busy = false
-                                            res.onFailure { errorMsg = it.message ?: "Could not register company." }
-                                        }
-                                    },
-                                    enabled = !busy && companyName.trim().length >= 2,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(lStr(R.string.register_company))
+                                if (company != null && RolePermissions.canManageCompany(prefs.activeUserRole)) {
+                                    Button(
+                                        onClick = {
+                                            if (busy) return@Button
+                                            busy = true
+                                            errorMsg = null
+                                            scope.launch {
+                                                val res = viewModel.updateCompanySettings(
+                                                    name = companyName,
+                                                    timezone = timezone,
+                                                    defaultArea = defaultArea
+                                                )
+                                                busy = false
+                                                res.onFailure { errorMsg = it.message ?: "Could not update company settings." }
+                                            }
+                                        },
+                                        enabled = !busy && companyName.trim().length >= 2,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .defaultMinSize(minHeight = 48.dp)
+                                    ) {
+                                        Text(lStr(R.string.save_company_settings))
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (busy) return@OutlinedButton
+                                            busy = true
+                                            errorMsg = null
+                                            scope.launch {
+                                                val res = viewModel.registerCompany(
+                                                    companyName = companyName,
+                                                    ownerName = fullName,
+                                                    ownerEmail = email,
+                                                    timezone = timezone,
+                                                    defaultArea = defaultArea
+                                                )
+                                                busy = false
+                                                res.onFailure { errorMsg = it.message ?: "Could not register company." }
+                                            }
+                                        },
+                                        enabled = !busy && companyName.trim().length >= 2,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .defaultMinSize(minHeight = 44.dp)
+                                    ) {
+                                        Text(lStr(R.string.create_new_company_hint))
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = {
+                                            if (busy) return@Button
+                                            busy = true
+                                            errorMsg = null
+                                            scope.launch {
+                                                val res = viewModel.registerCompany(
+                                                    companyName = companyName,
+                                                    ownerName = fullName,
+                                                    ownerEmail = email,
+                                                    timezone = timezone,
+                                                    defaultArea = defaultArea
+                                                )
+                                                busy = false
+                                                res.onFailure { errorMsg = it.message ?: "Could not register company." }
+                                            }
+                                        },
+                                        enabled = !busy && companyName.trim().length >= 2,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .defaultMinSize(minHeight = 48.dp)
+                                    ) {
+                                        Text(lStr(R.string.register_company))
+                                    }
                                 }
                             }
                         }

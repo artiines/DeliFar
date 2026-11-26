@@ -63,7 +63,9 @@ import com.delifar.app.ui.theme.AmberAccent
 import com.delifar.app.ui.theme.AmberContainer
 import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -106,7 +108,11 @@ fun JobEditorScreen(
     var saving by remember { mutableStateOf(false) }
 
     LaunchedEffect(stableJobId) {
-        val draft = viewModel.repository.db.draftDao().getDraft(stableJobId)
+        val (draft, existing) = withContext(Dispatchers.IO) {
+            val d = viewModel.repository.db.draftDao().getDraft(stableJobId)
+            val e = if (d == null && jobIdArg != null) viewModel.repository.db.jobDao().getJobWithItems(jobIdArg) else null
+            d to e
+        }
         if (draft != null) {
             isEditingExisting = draft.isEditingExisting
             storeId = draft.storeId.ifBlank { preselectedStoreId ?: activeStores.firstOrNull()?.store?.id.orEmpty() }
@@ -117,27 +123,30 @@ fun JobEditorScreen(
             val decoded = DeliFarRepository.decodeDraftItems(draft.itemsJson)
             itemRows.clear()
             itemRows.addAll(if (decoded.isEmpty()) listOf(DraftItemInput()) else decoded)
-        } else if (jobIdArg != null) {
-            val existing = viewModel.repository.db.jobDao().getJobWithItems(jobIdArg)
-            if (existing != null) {
-                isEditingExisting = true
-                storeId = existing.job.storeId
-                type = existing.job.type
-                dateIso = existing.job.date
-                timeIso = existing.job.time ?: ""
-                reminderEnabled = existing.job.reminderEnabled
-                assignedDriverUid = existing.job.assignedDriverUid
-                assignedDriverName = existing.job.assignedDriverName
-                notes = existing.job.notes
-                itemRows.clear()
-                itemRows.addAll(
-                    existing.sortedItems.map {
-                        DraftItemInput(id = it.id, name = it.name, planned = it.planned, unit = it.unit)
-                    }
-                )
-            }
+        } else if (existing != null) {
+            isEditingExisting = true
+            storeId = existing.job.storeId
+            type = existing.job.type
+            dateIso = existing.job.date
+            timeIso = existing.job.time ?: ""
+            reminderEnabled = existing.job.reminderEnabled
+            assignedDriverUid = existing.job.assignedDriverUid
+            assignedDriverName = existing.job.assignedDriverName
+            notes = existing.job.notes
+            itemRows.clear()
+            itemRows.addAll(
+                existing.sortedItems.map {
+                    DraftItemInput(id = it.id, name = it.name, planned = it.planned, unit = it.unit)
+                }
+            )
         }
         initialized = true
+    }
+
+    LaunchedEffect(activeStores, initialized) {
+        if (initialized && storeId.isBlank() && activeStores.isNotEmpty()) {
+            storeId = preselectedStoreId ?: activeStores.first().store.id
+        }
     }
 
     fun persistDraftNow() {

@@ -85,7 +85,9 @@ object IdempotentAuditUploader {
         remote: RemoteAuditDocument
     ): Boolean {
         val actorMatches = remote.actorUid == expectedActorUid ||
-            (entry.actorUid.isNotBlank() && remote.actorUid == entry.actorUid)
+            (entry.actorUid.isNotBlank() &&
+                !entry.actorUid.startsWith("local_") &&
+                remote.actorUid == entry.actorUid)
         return remote.documentId == entry.id &&
             remote.id == entry.id &&
             remote.companyId == entry.companyId &&
@@ -96,6 +98,7 @@ object IdempotentAuditUploader {
             remote.targetType == entry.targetType &&
             remote.targetId == entry.targetId &&
             remote.summary == entry.summary &&
+            remote.createdAt != null &&
             remote.createdAt == entry.createdAt
     }
 

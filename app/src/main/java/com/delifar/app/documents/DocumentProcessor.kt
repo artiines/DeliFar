@@ -13,6 +13,7 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import androidx.core.content.FileProvider
+import com.delifar.app.cloud.InvoiceSyncValidator
 import com.delifar.app.data.InvoicePageEntity
 import com.delifar.app.domain.BusinessRules
 import kotlinx.coroutines.Dispatchers
@@ -57,32 +58,84 @@ object DocumentProcessor {
         runCatching {
             val pageId = UUID.randomUUID().toString()
             val dir = invoiceDir(context, invoiceId)
-            val originalFile = File(dir, "orig_${pageId}.jpg")
+            val tempImport = File(dir, "tmp_${pageId}.bin")
             val editedFile = File(dir, "edit_${pageId}.jpg")
 
-            val rawBytes = context.contentResolver.openInputStream(sourceUri)?.use { it.readBytes() }
-                ?: throw IllegalStateException("Unable to read selected image.")
-            originalFile.writeBytes(rawBytes)
-            val origSha = BusinessRules.sha256Hex(rawBytes)
+            try {
+                context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                    FileOutputStream(tempImport).use { output -> input.copyTo(output) }
+                } ?: throw IllegalStateException("Unable to read selected image.")
+                if (tempImport.length() <= 0L) {
+                    throw IllegalStateException("Selected image file is empty.")
+                }
 
-            val editedBytes = renderAdjustedJpeg(originalFile, 0, false, 0)
-            editedFile.writeBytes(editedBytes)
-            val editSha = BusinessRules.sha256Hex(editedBytes)
+                val header = ByteArray(8)
+                val headerRead = tempImport.inputStream().use { it.read(header) }
+                val isJpeg = headerRead >= 3 &&
+                    (header[0].toInt() and 0xFF) == 0xFF &&
+                    (header[1].toInt() and 0xFF) == 0xD8 &&
+                    (header[2].toInt() and 0xFF) == 0xFF
+                val isPng = headerRead >= 8 &&
+                    (header[0].toInt() and 0xFF) == 0x89 &&
+                    header[1] == 0x50.toByte() &&
+                    header[2] == 0x4E.toByte() &&
+                    header[3] == 0x47.toByte()
 
-            InvoicePageEntity(
-                id = pageId,
-                invoiceId = invoiceId,
-                pageIndex = pageIndex,
-                originalLocalPath = originalFile.absolutePath,
-                editedLocalPath = editedFile.absolutePath,
-                originalSha256 = origSha,
-                editedSha256 = editSha,
-                rotationDegrees = 0,
-                contrastBoost = false,
-                cropInsetPercent = 0,
-                byteSize = originalFile.length() + editedFile.length(),
-                mimeType = "image/jpeg"
-            )
+                val (originalFile, mimeType) = when {
+                    isPng -> {
+                        val target = File(dir, "orig_${pageId}.png")
+                        if (!tempImport.renameTo(target)) {
+                            tempImport.copyTo(target, overwrite = true)
+                            tempImport.delete()
+                        }
+                        target to "image/png"
+                    }
+                    isJpeg -> {
+                        val target = File(dir, "orig_${pageId}.jpg")
+                        if (!tempImport.renameTo(target)) {
+                            tempImport.copyTo(target, overwrite = true)
+                            tempImport.delete()
+                        }
+                        target to "image/jpeg"
+                    }
+                    else -> {
+                        // Transcode WebP/HEIC/BMP into high-quality JPEG so Storage content-type rules pass
+                        val target = File(dir, "orig_${pageId}.jpg")
+                        val decoded = decodeScaledBitmap(tempImport.absolutePath, 2400)
+                            ?: throw IllegalStateException("Unsupported or corrupted image file.")
+                        try {
+                            FileOutputStream(target).use { out ->
+                                decoded.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                            }
+                        } finally {
+                            if (!decoded.isRecycled) decoded.recycle()
+                        }
+                        target to "image/jpeg"
+                    }
+                }
+
+                val origSha = InvoiceSyncValidator.computeFileSha256(originalFile)
+                val editedBytes = renderAdjustedJpeg(originalFile, 0, false, 0)
+                editedFile.writeBytes(editedBytes)
+                val editSha = BusinessRules.sha256Hex(editedBytes)
+
+                InvoicePageEntity(
+                    id = pageId,
+                    invoiceId = invoiceId,
+                    pageIndex = pageIndex,
+                    originalLocalPath = originalFile.absolutePath,
+                    editedLocalPath = editedFile.absolutePath,
+                    originalSha256 = origSha,
+                    editedSha256 = editSha,
+                    rotationDegrees = 0,
+                    contrastBoost = false,
+                    cropInsetPercent = 0,
+                    byteSize = originalFile.length() + editedFile.length(),
+                    mimeType = mimeType
+                )
+            } finally {
+                if (tempImport.exists()) runCatching { tempImport.delete() }
+            }
         }
     }
 
@@ -249,46 +302,48 @@ object DocumentProcessor {
     ): ByteArray {
         var bmp = decodeScaledBitmap(originalFile.absolutePath, MAX_DIMENSION_PX)
             ?: throw IllegalStateException("Cannot decode invoice image.")
+        try {
+            if (rotationDegrees != 0) {
+                val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+                val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+                if (rotated != bmp) bmp.recycle()
+                bmp = rotated
+            }
 
-        if (rotationDegrees != 0) {
-            val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-            val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-            if (rotated != bmp) bmp.recycle()
-            bmp = rotated
-        }
+            if (cropInsetPercent > 0) {
+                val dx = (bmp.width * cropInsetPercent / 100f).toInt()
+                val dy = (bmp.height * cropInsetPercent / 100f).toInt()
+                val w = (bmp.width - 2 * dx).coerceAtLeast(64)
+                val h = (bmp.height - 2 * dy).coerceAtLeast(64)
+                val cropped = Bitmap.createBitmap(bmp, dx, dy, w, h)
+                if (cropped != bmp) bmp.recycle()
+                bmp = cropped
+            }
 
-        if (cropInsetPercent > 0) {
-            val dx = (bmp.width * cropInsetPercent / 100f).toInt()
-            val dy = (bmp.height * cropInsetPercent / 100f).toInt()
-            val w = (bmp.width - 2 * dx).coerceAtLeast(64)
-            val h = (bmp.height - 2 * dy).coerceAtLeast(64)
-            val cropped = Bitmap.createBitmap(bmp, dx, dy, w, h)
-            if (cropped != bmp) bmp.recycle()
-            bmp = cropped
-        }
-
-        if (contrastBoost) {
-            val enhanced = Bitmap.createBitmap(bmp.width, bmp.height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(enhanced)
-            val contrast = 1.32f
-            val translate = (-.5f * contrast + .5f) * 255f + 12f
-            val cm = ColorMatrix(
-                floatArrayOf(
-                    contrast, 0f, 0f, 0f, translate,
-                    0f, contrast, 0f, 0f, translate,
-                    0f, 0f, contrast, 0f, translate,
-                    0f, 0f, 0f, 1f, 0f
+            if (contrastBoost) {
+                val enhanced = Bitmap.createBitmap(bmp.width, bmp.height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(enhanced)
+                val contrast = 1.32f
+                val translate = (-.5f * contrast + .5f) * 255f + 12f
+                val cm = ColorMatrix(
+                    floatArrayOf(
+                        contrast, 0f, 0f, 0f, translate,
+                        0f, contrast, 0f, 0f, translate,
+                        0f, 0f, contrast, 0f, translate,
+                        0f, 0f, 0f, 1f, 0f
+                    )
                 )
-            )
-            val paint = Paint().apply { colorFilter = ColorMatrixColorFilter(cm) }
-            canvas.drawBitmap(bmp, 0f, 0f, paint)
-            bmp.recycle()
-            bmp = enhanced
-        }
+                val paint = Paint().apply { colorFilter = ColorMatrixColorFilter(cm) }
+                canvas.drawBitmap(bmp, 0f, 0f, paint)
+                bmp.recycle()
+                bmp = enhanced
+            }
 
-        val out = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
-        bmp.recycle()
-        return out.toByteArray()
+            val out = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+            return out.toByteArray()
+        } finally {
+            if (!bmp.isRecycled) bmp.recycle()
+        }
     }
 }

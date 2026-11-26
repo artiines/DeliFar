@@ -38,6 +38,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -47,7 +48,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -58,12 +63,16 @@ import androidx.compose.ui.unit.dp
 import com.delifar.app.R
 import com.delifar.app.cloud.FirebaseServices
 import com.delifar.app.data.DraftEntity
+import com.delifar.app.data.JobItemEntity
 import com.delifar.app.data.JobListRow
 import com.delifar.app.data.JobStatus
 import com.delifar.app.data.StoreWithHours
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
 import com.delifar.app.ui.components.JobCard
+import com.delifar.app.ui.components.LocalAppLocale
+import com.delifar.app.ui.components.ReceivingWindowStatusTag
+import com.delifar.app.ui.components.ReportIssueDialog
 import com.delifar.app.ui.components.RoleBadge
 import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.jobTypeLabel
@@ -81,7 +90,6 @@ import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -94,6 +102,7 @@ fun HomeScreen(
     companyName: String?,
     hasAccount: Boolean,
     onboardingDismissed: Boolean,
+    offlineCompaniesToClaimCount: Int = 0,
     onOpenSettings: () -> Unit,
     onOpenAccount: () -> Unit,
     onOpenTeam: () -> Unit,
@@ -105,17 +114,21 @@ fun HomeScreen(
     onQuickStartJob: (String) -> Unit,
     onQuickCompleteJob: (String) -> Unit,
     onAddInvoiceForJob: (String, String) -> Unit,
+    onLoadJobItems: suspend (String) -> List<JobItemEntity> = { emptyList() },
+    onReportIssue: (jobId: String, issueType: String, note: String, keepOpen: Boolean, actuals: Map<String, String>, onDone: () -> Unit) -> Unit = { _, _, _, _, _, onDone -> onDone() },
     onDismissOnboarding: () -> Unit,
     onNotify: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val appLocale = LocalAppLocale.current
     val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
     val todayIso = today.toString()
-    val prettyDate = remember(today) {
-        today.format(DateTimeFormatter.ofPattern("EEE, MMM d", Locale.US))
+    val prettyDate = remember(today, appLocale) {
+        today.format(DateTimeFormatter.ofPattern("EEE, MMM d", appLocale))
     }
 
     val storesById = remember(stores) { stores.associateBy { it.store.id } }
+    val activeStores = remember(stores) { stores.filter { !it.store.archived } }
     val overdueJobs = remember(jobRows, today) {
         BusinessRules.sortJobsForDay(jobRows.filter { BusinessRules.isOverdue(it.job.date, it.job.status, today) })
     }
@@ -123,22 +136,31 @@ fun HomeScreen(
         BusinessRules.sortJobsForDay(jobRows.filter { it.job.date == todayIso })
     }
     val activeTodayJobs = remember(todayJobs) { todayJobs.filter { it.job.status in JobStatus.ACTIVE } }
+    val completedTodayCount = remember(todayJobs) { todayJobs.count { it.job.status == JobStatus.COMPLETED } }
     val nextStop: JobListRow? = remember(activeTodayJobs, overdueJobs) {
         activeTodayJobs.firstOrNull { it.job.status == JobStatus.PROGRESS }
             ?: activeTodayJobs.firstOrNull()
             ?: overdueJobs.firstOrNull()
     }
 
+    var quickIssueTarget by remember { mutableStateOf<JobListRow?>(null) }
+    val quickIssueItems by produceState<List<JobItemEntity>>(initialValue = emptyList(), key1 = quickIssueTarget?.job?.id) {
+        val targetId = quickIssueTarget?.job?.id
+        value = if (targetId != null) onLoadJobItems(targetId) else emptyList()
+    }
+
     val todayActiveCount = activeTodayJobs.size
-    val completedTodayCount = todayJobs.count { it.job.status == JobStatus.COMPLETED }
-    val activeStores = stores.filter { !it.store.archived }
     val canManage = RolePermissions.canManageStoresAndJobs(userRole)
     val canUpdateJobs = RolePermissions.canUpdateAssignedJobs(userRole)
     val canUploadInvoices = RolePermissions.canUploadAndSignInvoices(userRole)
     val invalidCoordMsg = lStr(R.string.invalid_store_coordinates)
 
-    val setupComplete = activeStores.isNotEmpty() && jobRows.isNotEmpty()
-    val showSetupChecklist = !onboardingDismissed && !setupComplete && canManage
+    val setupComplete = if (canManage) {
+        activeStores.isNotEmpty() && jobRows.isNotEmpty()
+    } else {
+        !companyName.isNullOrBlank() || jobRows.isNotEmpty()
+    }
+    val showSetupChecklist = !onboardingDismissed && !setupComplete
 
     fun navigateToRow(row: JobListRow) {
         val store = storesById[row.job.storeId]?.store
@@ -205,33 +227,98 @@ fun HomeScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Daily operational counters
+            // Daily operational counters + Smart Distributor Shift Progress
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    StatTile(
-                        label = lStr(R.string.today),
-                        value = todayActiveCount.toString(),
-                        bg = MaterialTheme.colorScheme.primaryContainer,
-                        fg = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    StatTile(
-                        label = lStr(R.string.overdue),
-                        value = overdueJobs.size.toString(),
-                        bg = if (overdueJobs.isNotEmpty()) TerracottaContainer else MaterialTheme.colorScheme.surfaceVariant,
-                        fg = if (overdueJobs.isNotEmpty()) TerracottaError else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
-                    )
-                    StatTile(
-                        label = lStr(R.string.home_completed_today),
-                        value = completedTodayCount.toString(),
-                        bg = SuccessContainer,
-                        fg = SuccessGreen,
-                        modifier = Modifier.weight(1f)
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        StatTile(
+                            label = lStr(R.string.today),
+                            value = todayActiveCount.toString(),
+                            bg = MaterialTheme.colorScheme.primaryContainer,
+                            fg = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatTile(
+                            label = lStr(R.string.overdue),
+                            value = overdueJobs.size.toString(),
+                            bg = if (overdueJobs.isNotEmpty()) TerracottaContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            fg = if (overdueJobs.isNotEmpty()) TerracottaError else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        StatTile(
+                            label = lStr(R.string.home_completed_today),
+                            value = completedTodayCount.toString(),
+                            bg = SuccessContainer,
+                            fg = SuccessGreen,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    if (todayJobs.isNotEmpty()) {
+                        val progress = (completedTodayCount.toFloat() / todayJobs.size.toFloat()).coerceIn(0f, 1f)
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = lStr(R.string.shift_progress_label, completedTodayCount, todayJobs.size),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                LinearProgressIndicator(
+                                    progress = { progress },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Explicit Offline-to-Cloud Company Claiming Prompt on Home when signed in
+            if (offlineCompaniesToClaimCount > 0) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = AmberContainer),
+                        border = BorderStroke(1.dp, AmberAccent.copy(alpha = 0.5f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenAccount)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = lStr(R.string.claim_offline_home_banner, offlineCompaniesToClaimCount),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF451A03),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Button(
+                                onClick = onOpenAccount,
+                                modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                            ) {
+                                Text(lStr(R.string.claim_offline_company_action))
+                            }
+                        }
+                    }
                 }
             }
 
@@ -243,6 +330,7 @@ fun HomeScreen(
                         hasCompany = !companyName.isNullOrBlank(),
                         hasStore = activeStores.isNotEmpty(),
                         hasDelivery = jobRows.isNotEmpty(),
+                        canManage = canManage,
                         onOpenAccount = onOpenAccount,
                         onAddStore = onAddStore,
                         onNewJob = onNewJob,
@@ -308,6 +396,8 @@ fun HomeScreen(
                     NextStopSpotlightCard(
                         row = nextStop,
                         receivingHoursToday = hoursText,
+                        storeHours = stopStore?.hours.orEmpty(),
+                        zoneId = zoneId,
                         isOverdue = isOverdue,
                         canUpdateStatus = canUpdateJobs,
                         canUploadInvoice = canUploadInvoices,
@@ -322,7 +412,8 @@ fun HomeScreen(
                                 onQuickStartJob(nextStop.job.id)
                             }
                         },
-                        onInvoice = { onAddInvoiceForJob(nextStop.job.id, nextStop.job.storeId) }
+                        onInvoice = { onAddInvoiceForJob(nextStop.job.id, nextStop.job.storeId) },
+                        onQuickIssue = { quickIssueTarget = nextStop }
                     )
                 }
             }
@@ -382,6 +473,7 @@ fun HomeScreen(
                         zoneId = zoneId,
                         onClick = { onOpenJob(row.job.id) },
                         receivingHoursToday = storeWithHours?.let { todayHoursSummary(it.hours, zoneId) },
+                        storeHours = storeWithHours?.hours.orEmpty(),
                         onQuickNavigate = { navigateToRow(row) },
                         onQuickCall = if (phone.isNotBlank()) ({ launchDialer(context, phone) }) else null,
                         onQuickAdvanceStatus = if (canUpdateJobs) {
@@ -444,6 +536,7 @@ fun HomeScreen(
                         zoneId = zoneId,
                         onClick = { onOpenJob(row.job.id) },
                         receivingHoursToday = storeWithHours?.let { todayHoursSummary(it.hours, zoneId) },
+                        storeHours = storeWithHours?.hours.orEmpty(),
                         onQuickNavigate = { navigateToRow(row) },
                         onQuickCall = if (phone.isNotBlank()) ({ launchDialer(context, phone) }) else null,
                         onQuickAdvanceStatus = if (canUpdateJobs) {
@@ -459,6 +552,20 @@ fun HomeScreen(
                 }
             }
         }
+
+        quickIssueTarget?.let { target ->
+            ReportIssueDialog(
+                items = quickIssueItems,
+                initialIssue = target.job.issue,
+                initialNote = target.job.issueNote,
+                onDismiss = { quickIssueTarget = null },
+                onSubmit = { issueType, note, keepOpen, actuals ->
+                    onReportIssue(target.job.id, issueType, note, keepOpen, actuals) {
+                        quickIssueTarget = null
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -468,6 +575,7 @@ private fun QuickSetupCard(
     hasCompany: Boolean,
     hasStore: Boolean,
     hasDelivery: Boolean,
+    canManage: Boolean,
     onOpenAccount: () -> Unit,
     onAddStore: () -> Unit,
     onNewJob: () -> Unit,
@@ -501,7 +609,10 @@ private fun QuickSetupCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                TextButton(onClick = onDismiss) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                ) {
                     Text(lStr(R.string.setup_dismiss))
                 }
             }
@@ -511,22 +622,30 @@ private fun QuickSetupCard(
                 done = hasAccount,
                 onClick = onOpenAccount
             )
-            SetupChecklistRow(
-                title = lStr(R.string.setup_step_company),
-                done = hasCompany,
-                onClick = onOpenAccount
-            )
-            SetupChecklistRow(
-                title = lStr(R.string.setup_step_store),
-                done = hasStore,
-                onClick = onAddStore
-            )
-            SetupChecklistRow(
-                title = lStr(R.string.setup_step_delivery),
-                done = hasDelivery,
-                enabled = hasStore,
-                onClick = onNewJob
-            )
+            if (canManage) {
+                SetupChecklistRow(
+                    title = lStr(R.string.setup_step_company),
+                    done = hasCompany,
+                    onClick = onOpenAccount
+                )
+                SetupChecklistRow(
+                    title = lStr(R.string.setup_step_store),
+                    done = hasStore,
+                    onClick = onAddStore
+                )
+                SetupChecklistRow(
+                    title = lStr(R.string.setup_step_delivery),
+                    done = hasDelivery,
+                    enabled = hasStore,
+                    onClick = onNewJob
+                )
+            } else {
+                SetupChecklistRow(
+                    title = lStr(R.string.setup_step_join_team),
+                    done = hasCompany,
+                    onClick = onOpenAccount
+                )
+            }
         }
     }
 }
@@ -541,7 +660,7 @@ private fun SetupChecklistRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .defaultMinSize(minHeight = 40.dp)
+            .defaultMinSize(minHeight = 48.dp)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -570,6 +689,8 @@ private fun SetupChecklistRow(
 private fun NextStopSpotlightCard(
     row: JobListRow,
     receivingHoursToday: String?,
+    storeHours: List<com.delifar.app.data.StoreHoursEntity>,
+    zoneId: ZoneId,
     isOverdue: Boolean,
     canUpdateStatus: Boolean,
     canUploadInvoice: Boolean,
@@ -578,7 +699,8 @@ private fun NextStopSpotlightCard(
     onNavigate: () -> Unit,
     onCall: () -> Unit,
     onAdvanceStatus: () -> Unit,
-    onInvoice: () -> Unit
+    onInvoice: () -> Unit,
+    onQuickIssue: () -> Unit
 ) {
     val (badgeBg, badgeFg) = statusColors(row.job.status, isOverdue)
     val isInProgress = row.job.status == JobStatus.PROGRESS
@@ -609,11 +731,19 @@ private fun NextStopSpotlightCard(
                     color = if (isOverdue) TerracottaError else MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold
                 )
-                StatusTag(
-                    text = if (isOverdue) lStr(R.string.overdue) else statusLabel(row.job.status),
-                    bg = badgeBg,
-                    fg = badgeFg
-                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (storeHours.isNotEmpty()) {
+                        ReceivingWindowStatusTag(hours = storeHours, zoneId = zoneId)
+                    }
+                    StatusTag(
+                        text = if (isOverdue) lStr(R.string.overdue) else statusLabel(row.job.status),
+                        bg = badgeBg,
+                        fg = badgeFg
+                    )
+                }
             }
 
             Text(
@@ -691,7 +821,7 @@ private fun NextStopSpotlightCard(
                 }
             }
 
-            // Secondary one-handed driver actions row (Call, Invoice/Sign, Issue)
+            // Secondary one-handed driver actions row (Call, Invoice/Sign, 1-tap Issue)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -723,7 +853,7 @@ private fun NextStopSpotlightCard(
                     }
                 }
                 OutlinedButton(
-                    onClick = onOpenJob,
+                    onClick = onQuickIssue,
                     modifier = Modifier
                         .weight(1f)
                         .defaultMinSize(minHeight = 44.dp),

@@ -222,10 +222,26 @@ object FirebaseServices {
                 db.collection("companies").document(companyId)
                     .collection("employees").document(user.uid)
                     .get(Source.SERVER).await()
+                BackendHealthCheck(BackendHealth.REACHABLE)
             } else {
-                db.collection("users").document(user.uid).get(Source.SERVER).await()
+                // Probe Firestore server reachability without requiring a company document yet.
+                // Default-deny rules reject `/users/{uid}` with PERMISSION_DENIED even when Firestore
+                // is healthy and reachable, whereas NOT_FOUND/FAILED_PRECONDITION means Firestore is not configured.
+                try {
+                    db.collection("companies").document("_connectivity_probe_").get(Source.SERVER).await()
+                    BackendHealthCheck(BackendHealth.REACHABLE)
+                } catch (probeErr: Exception) {
+                    val classified = classifyBackendError(probeErr)
+                    if (classified.health == BackendHealth.ACCESS_DENIED) {
+                        BackendHealthCheck(
+                            BackendHealth.REACHABLE,
+                            "Connected. Register or join a company to start syncing."
+                        )
+                    } else {
+                        classified
+                    }
+                }
             }
-            BackendHealthCheck(BackendHealth.REACHABLE)
         } catch (e: Exception) {
             classifyBackendError(e)
         }

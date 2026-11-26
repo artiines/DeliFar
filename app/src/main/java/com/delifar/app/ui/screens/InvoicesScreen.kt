@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -17,7 +18,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudUpload
@@ -87,6 +90,7 @@ fun InvoicesScreen(
     val context = LocalContext.current
     val prefs by viewModel.preferences.collectAsState()
     val syncState by viewModel.syncState.collectAsState()
+    val invoiceAttachmentIssues by viewModel.invoiceAttachmentIssues.collectAsState()
     val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
     val scope = rememberCoroutineScope()
 
@@ -211,7 +215,7 @@ fun InvoicesScreen(
                         val inv = iwp.invoice
                         val isUploadingNow = syncState.currentlyUploadingInvoiceId == inv.id
                         val hasAllRemote = remember(iwp) { InvoiceSyncValidator.hasAllRemoteAttachments(iwp) }
-                        val localIssues = remember(iwp) { InvoiceSyncValidator.inspectLocalAttachmentIssues(iwp) }
+                        val localIssues = invoiceAttachmentIssues[inv.id].orEmpty()
                         val (displayStatusText, stBg, stFg) = when {
                             isUploadingNow -> Triple(lStr(R.string.invoice_status_uploading), InfoContainer, InfoBlue)
                             inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED ->
@@ -260,14 +264,18 @@ fun InvoicesScreen(
                                 }
                                 Text(inv.storeName, style = MaterialTheme.typography.bodyMedium)
                                 Text(
-                                    text = "${BusinessRules.formatTimestamp(inv.createdAt, zoneId)} • ${iwp.pages.size} page(s) • ${inv.createdByName}",
+                                    text = "${BusinessRules.formatTimestamp(inv.createdAt, zoneId)} • ${lStr(R.string.invoice_pages_count, iwp.pages.size)} • ${inv.createdByName}",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 if (inv.signed) {
+                                    val sigScopeLabel = if (inv.signedServerAt != null) {
+                                        lStr(R.string.invoice_server_verified)
+                                    } else {
+                                        lStr(R.string.invoice_local_capture)
+                                    }
                                     Text(
-                                        text = "Signed by ${inv.recipientName}" +
-                                            (if (inv.signedServerAt != null) " • Server verified" else " • Local capture"),
+                                        text = "${lStr(R.string.invoice_signed_by, inv.recipientName)} • $sigScopeLabel",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.primary
                                     )
@@ -284,7 +292,8 @@ fun InvoicesScreen(
                                 if (needsRetry) {
                                     OutlinedButton(
                                         onClick = { viewModel.retryInvoiceUpload(inv.id) },
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        modifier = Modifier.defaultMinSize(minHeight = 44.dp)
                                     ) {
                                         Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(6.dp))
@@ -302,33 +311,45 @@ fun InvoicesScreen(
     // Invoice Detail & Actions Modal
     selectedInvoice?.let { iwp ->
         val inv = iwp.invoice
+        val detailIssues = invoiceAttachmentIssues[inv.id].orEmpty()
         AlertDialog(
             onDismissRequest = { selectedInvoice = null },
-            title = { Text("Invoice #${inv.invoiceNumber} (v${inv.version})") },
+            title = { Text(lStr(R.string.invoice_detail_title, inv.invoiceNumber, inv.version)) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Store: ${inv.storeName}", style = MaterialTheme.typography.bodyMedium)
-                    Text("Status: ${invoiceStatusLabel(inv.status)}", style = MaterialTheme.typography.bodyMedium)
-                    Text("Uploaded by: ${inv.createdByName}", style = MaterialTheme.typography.bodySmall)
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(lStr(R.string.invoice_store_label, inv.storeName), style = MaterialTheme.typography.bodyMedium)
+                    Text(lStr(R.string.invoice_status_field, invoiceStatusLabel(inv.status)), style = MaterialTheme.typography.bodyMedium)
+                    Text(lStr(R.string.invoice_uploaded_by, inv.createdByName), style = MaterialTheme.typography.bodySmall)
                     if (inv.notes.isNotBlank()) {
-                        Text("Notes: ${inv.notes}", style = MaterialTheme.typography.bodySmall)
+                        Text(lStr(R.string.invoice_notes_field, inv.notes), style = MaterialTheme.typography.bodySmall)
                     }
                     if (inv.signed) {
-                        Text("Recipient: ${inv.recipientName} ${inv.recipientTitle}".trim(), style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            lStr(R.string.invoice_recipient_field, "${inv.recipientName} ${inv.recipientTitle}".trim()),
+                            style = MaterialTheme.typography.bodySmall
+                        )
                         inv.signedLocalAt?.let {
-                            Text("Local Capture: ${BusinessRules.formatTimestamp(it, zoneId)}", style = MaterialTheme.typography.labelSmall)
+                            Text(
+                                lStr(R.string.invoice_local_capture_time, BusinessRules.formatTimestamp(it, zoneId)),
+                                style = MaterialTheme.typography.labelSmall
+                            )
                         }
                         Text(
-                            "Server Confirmed: " + (inv.signedServerAt?.let { BusinessRules.formatTimestamp(it, zoneId) } ?: "Pending sync"),
+                            lStr(
+                                R.string.invoice_server_confirmed_time,
+                                inv.signedServerAt?.let { BusinessRules.formatTimestamp(it, zoneId) } ?: lStr(R.string.invoice_pending_sync)
+                            ),
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
                     inv.voidedReason?.let {
-                        Text("Voided reason: $it", color = TerracottaError, style = MaterialTheme.typography.bodySmall)
+                        Text(lStr(R.string.invoice_voided_reason_field, it), color = TerracottaError, style = MaterialTheme.typography.bodySmall)
                     }
-                    val detailIssues = remember(iwp) { InvoiceSyncValidator.inspectLocalAttachmentIssues(iwp) }
                     if (!inv.uploadError.isNullOrBlank()) {
-                        Text("Upload error: ${inv.uploadError}", color = TerracottaError, style = MaterialTheme.typography.bodySmall)
+                        Text(lStr(R.string.invoice_upload_error_field, inv.uploadError), color = TerracottaError, style = MaterialTheme.typography.bodySmall)
                     }
                     detailIssues.forEach { issue ->
                         Text("• $issue", color = TerracottaError, style = MaterialTheme.typography.bodySmall)
@@ -336,14 +357,16 @@ fun InvoicesScreen(
 
                     // Safe retry upload (preserves signed state and history)
                     if (inv.companyId.isNotBlank() &&
-                        (inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED || inv.status == InvoiceStatus.PENDING_UPLOAD)
+                        (inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED || inv.status == InvoiceStatus.PENDING_UPLOAD || !inv.uploadError.isNullOrBlank())
                     ) {
                         Button(
                             onClick = {
                                 viewModel.retryInvoiceUpload(inv.id)
                                 selectedInvoice = null
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
                         ) {
                             Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
@@ -358,7 +381,9 @@ fun InvoicesScreen(
                                 selectedInvoice = null
                                 onSignInvoice(inv.id)
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
                         ) {
                             Icon(Icons.Default.Draw, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
@@ -371,7 +396,9 @@ fun InvoicesScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                             OutlinedButton(
                                 onClick = { SignedPdfGenerator.openFile(context, pdfPath, "application/pdf") },
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 44.dp)
                             ) {
                                 Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(4.dp))
@@ -379,20 +406,25 @@ fun InvoicesScreen(
                             }
                             OutlinedButton(
                                 onClick = { SignedPdfGenerator.printPdf(context, pdfPath, "DeliFar-${inv.invoiceNumber}") },
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .defaultMinSize(minHeight = 44.dp)
                             ) {
                                 Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text(lStr(R.string.print_pdf))
                             }
                         }
+                        val sharePdfTitle = lStr(R.string.share_pdf)
                         OutlinedButton(
-                            onClick = { SignedPdfGenerator.shareFile(context, pdfPath, "application/pdf", "Share Signed Invoice PDF") },
-                            modifier = Modifier.fillMaxWidth()
+                            onClick = { SignedPdfGenerator.shareFile(context, pdfPath, "application/pdf", sharePdfTitle) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 44.dp)
                         ) {
                             Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text(lStr(R.string.share_pdf))
+                            Text(sharePdfTitle)
                         }
                     }
 
@@ -400,7 +432,9 @@ fun InvoicesScreen(
                     if (!origPath.isNullOrBlank()) {
                         OutlinedButton(
                             onClick = { SignedPdfGenerator.openFile(context, origPath, "image/jpeg") },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 44.dp)
                         ) {
                             Text(lStr(R.string.view_original_photo))
                         }
@@ -414,7 +448,9 @@ fun InvoicesScreen(
                                         selectedInvoice = null
                                         correctTarget = iwp
                                     },
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 44.dp)
                                 ) {
                                     Text(lStr(R.string.new_corrected_version))
                                 }
@@ -423,7 +459,8 @@ fun InvoicesScreen(
                                 onClick = {
                                     selectedInvoice = null
                                     voidTarget = iwp
-                                }
+                                },
+                                modifier = Modifier.defaultMinSize(minHeight = 44.dp)
                             ) {
                                 Text(lStr(R.string.void_invoice), color = TerracottaError)
                             }
@@ -447,7 +484,7 @@ fun InvoicesScreen(
                 OutlinedTextField(
                     value = reason,
                     onValueChange = { reason = it },
-                    label = { Text("Audit reason (required)") },
+                    label = { Text(lStr(R.string.invoice_void_reason_hint)) },
                     modifier = Modifier.fillMaxWidth()
                 )
             },
@@ -475,13 +512,13 @@ fun InvoicesScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Signed invoices cannot be altered. This creates v${target.invoice.version + 1} with a full audit link to v${target.invoice.version}.",
+                        lStr(R.string.invoice_correction_explain, target.invoice.version + 1, target.invoice.version),
                         style = MaterialTheme.typography.bodySmall
                     )
                     OutlinedTextField(
                         value = note,
                         onValueChange = { note = it },
-                        label = { Text("Correction reason") },
+                        label = { Text(lStr(R.string.invoice_correction_reason_hint)) },
                         modifier = Modifier.fillMaxWidth()
                     )
                 }

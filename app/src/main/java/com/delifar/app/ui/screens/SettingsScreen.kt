@@ -10,9 +10,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -81,7 +84,7 @@ import com.delifar.app.ui.theme.SuccessGreen
 import com.delifar.app.ui.theme.TerracottaError
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     viewModel: DeliFarViewModel,
@@ -156,6 +159,11 @@ fun SettingsScreen(
     var tzDropdownExpanded by remember { mutableStateOf(false) }
     val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
 
+    val summarySavedMsg = lStr(R.string.summary_time_saved)
+    val summaryInvalidMsg = lStr(R.string.summary_time_invalid)
+    val advanceSavedMsg = lStr(R.string.advance_minutes_saved)
+    val advanceInvalidMsg = lStr(R.string.advance_minutes_invalid)
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -193,7 +201,7 @@ fun SettingsScreen(
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = prefs.activeUserEmail.ifBlank { prefs.activeUserName.ifBlank { "Local Profile" } },
+                                text = prefs.activeUserEmail.ifBlank { prefs.activeUserName.ifBlank { lStr(R.string.local_profile) } },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -229,12 +237,17 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        text = "Queue: $pendingSyncCount pending • $failedSyncCount failed",
+                        text = lStr(R.string.sync_queue_counts, pendingSyncCount, failedSyncCount),
                         style = MaterialTheme.typography.labelMedium,
                         color = if (failedSyncCount > 0) TerracottaError else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        text = "Firebase config: ${if (FirebaseServices.isConfigured) "Bundled" else "Not bundled"} • Auth: ${if (FirebaseServices.isAuthenticated) "Signed in" else "Not signed in"} • App Check: ${if (FirebaseServices.appCheckInstalled) FirebaseServices.appCheckProviderName else "Inactive"}",
+                        text = lStr(
+                            R.string.sync_env_diag,
+                            if (FirebaseServices.isConfigured) lStr(R.string.sync_bundled) else lStr(R.string.sync_not_bundled),
+                            if (FirebaseServices.isAuthenticated) lStr(R.string.sync_signed_in) else lStr(R.string.sync_not_signed_in),
+                            if (FirebaseServices.appCheckInstalled) FirebaseServices.appCheckProviderName else lStr(R.string.sync_inactive)
+                        ),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -258,28 +271,49 @@ fun SettingsScreen(
                                 modifier = Modifier.padding(12.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Text(
-                                    text = "Failed Sync Queue Details (${failedSyncItems.size})",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = TerracottaError
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = lStr(R.string.failed_queue_details_title, failedSyncItems.size),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = TerracottaError,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        onClick = { viewModel.triggerSyncNow() },
+                                        modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                    ) {
+                                        Text(lStr(R.string.sync_now), color = TerracottaError)
+                                    }
+                                }
                                 failedSyncItems.forEachIndexed { idx, failedItem ->
                                     if (idx > 0) {
                                         HorizontalDivider(color = TerracottaError.copy(alpha = 0.25f))
                                     }
                                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                         Text(
-                                            text = "Entity: ${failedItem.entityType} • Operation: ${failedItem.operation} • Attempts: ${failedItem.retryCount}",
+                                            text = lStr(
+                                                R.string.failed_queue_item_header,
+                                                failedItem.entityType,
+                                                failedItem.operation,
+                                                failedItem.retryCount
+                                            ),
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         Text(
-                                            text = "ID: ${failedItem.entityId}",
+                                            text = lStr(R.string.failed_queue_item_id, failedItem.entityId),
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                         Text(
-                                            text = "Error: ${failedItem.lastError?.ifBlank { null } ?: "Unknown sync error"}",
+                                            text = lStr(
+                                                R.string.failed_queue_item_error,
+                                                failedItem.lastError?.ifBlank { null } ?: lStr(R.string.unknown_sync_error)
+                                            ),
                                             style = MaterialTheme.typography.bodySmall,
                                             color = TerracottaError
                                         )
@@ -464,9 +498,9 @@ fun SettingsScreen(
                                 val min = BusinessRules.parseMinuteOfDay(summaryTimeInput)
                                 if (min != null) {
                                     viewModel.updatePreference(PrefKeys.SUMMARY_MINUTE, min.toString())
-                                    viewModel.notifyMessage("Summary time saved.")
+                                    viewModel.notifyMessage(summarySavedMsg)
                                 } else {
-                                    viewModel.notifyMessage("Use 24-hour HH:mm format.")
+                                    viewModel.notifyMessage(summaryInvalidMsg)
                                 }
                             }
                         ) { Text(lStr(R.string.save)) }
@@ -491,9 +525,9 @@ fun SettingsScreen(
                                 val v = advanceInput.trim().toIntOrNull()
                                 if (v != null && v in 1..10080) {
                                     viewModel.updatePreference(PrefKeys.ADVANCE, v.toString())
-                                    viewModel.notifyMessage("Advance minutes saved.")
+                                    viewModel.notifyMessage(advanceSavedMsg)
                                 } else {
-                                    viewModel.notifyMessage("Enter 1–10080 minutes.")
+                                    viewModel.notifyMessage(advanceInvalidMsg)
                                 }
                             }
                         ) { Text(lStr(R.string.save)) }
@@ -549,32 +583,38 @@ fun SettingsScreen(
             item {
                 SettingsCard(title = lStr(R.string.settings_backup)) {
                     Text(
-                        text = "Full Encrypted Backup (.delifarbak) uses AES-256-GCM to protect company settings, stores, jobs, invoice scans, signatures, and signed PDFs. Auth credentials and signing keys are never exported.",
+                        text = lStr(R.string.encrypted_backup_desc),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Button(
                         onClick = { showExportPassphraseDialog = true },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
                     ) {
                         Icon(Icons.Default.Upload, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
-                        Text("Export Encrypted Backup (.delifarbak)")
+                        Text(lStr(R.string.export_encrypted_backup))
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = { importLauncher.launch(arrayOf("*/*")) },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 44.dp)
                         ) {
                             Icon(Icons.Default.Download, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("Import Backup")
+                            Text(lStr(R.string.import_backup_btn))
                         }
                         OutlinedButton(
                             onClick = { exportLauncher.launch("delifar-backup-${BusinessRules.todayIso(zoneId)}.json") },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .weight(1f)
+                                .defaultMinSize(minHeight = 44.dp)
                         ) {
-                            Text("Legacy JSON (v1)")
+                            Text(lStr(R.string.legacy_json_btn))
                         }
                     }
                 }
@@ -584,22 +624,24 @@ fun SettingsScreen(
             item {
                 SettingsCard(title = lStr(R.string.settings_mapping_services)) {
                     Text(
-                        text = "Personal / Device Mode: Android Geocoder + manual map pin works out of the box with no API key.\n" +
-                            "Commercial Fleet Mode: Do not rely on the public Nominatim demo server for commercial fleet volume — configure your own self-hosted or commercial HTTPS geocoding & OSRM routing endpoints below.",
+                        text = lStr(R.string.mapping_fleet_note),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         FilterChip(
                             selected = mapStyleUrlInput == AppPreferences.DEFAULT_MAP_STYLE_URL,
                             onClick = { mapStyleUrlInput = AppPreferences.DEFAULT_MAP_STYLE_URL },
-                            label = { Text("OpenFreeMap Liberty") }
+                            label = { Text(lStr(R.string.style_openfreemap_liberty)) }
                         )
                         FilterChip(
                             selected = mapStyleUrlInput == AppPreferences.OPENFREEMAP_POSITRON_STYLE_URL,
                             onClick = { mapStyleUrlInput = AppPreferences.OPENFREEMAP_POSITRON_STYLE_URL },
-                            label = { Text("Positron Light") }
+                            label = { Text(lStr(R.string.style_positron_light)) }
                         )
                     }
 
@@ -629,7 +671,7 @@ fun SettingsScreen(
                         value = routingUrlInput,
                         onValueChange = { routingUrlInput = it },
                         label = { Text(lStr(R.string.settings_routing_url)) },
-                        placeholder = { Text("Leave blank for offline stop order") },
+                        placeholder = { Text(lStr(R.string.routing_placeholder)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -796,19 +838,21 @@ fun SettingsScreen(
         var pass1 by remember { mutableStateOf("") }
         var pass2 by remember { mutableStateOf("") }
         var passErr by remember { mutableStateOf<String?>(null) }
+        val errTooShort = lStr(R.string.passphrase_too_short, EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH)
+        val errMismatch = lStr(R.string.passphrase_mismatch)
         AlertDialog(
             onDismissRequest = { showExportPassphraseDialog = false },
-            title = { Text("Encrypt Full Backup") },
+            title = { Text(lStr(R.string.encrypt_backup_title)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Choose a passphrase (at least ${EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH} characters). You will need this exact passphrase to restore the backup.",
+                        lStr(R.string.encrypt_backup_body, EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH),
                         style = MaterialTheme.typography.bodySmall
                     )
                     OutlinedTextField(
                         value = pass1,
                         onValueChange = { pass1 = it; passErr = null },
-                        label = { Text("Passphrase") },
+                        label = { Text(lStr(R.string.passphrase_label)) },
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -816,7 +860,7 @@ fun SettingsScreen(
                     OutlinedTextField(
                         value = pass2,
                         onValueChange = { pass2 = it; passErr = null },
-                        label = { Text("Confirm Passphrase") },
+                        label = { Text(lStr(R.string.confirm_passphrase_label)) },
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -831,9 +875,9 @@ fun SettingsScreen(
                     onClick = {
                         when {
                             pass1.length < EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH ->
-                                passErr = "Passphrase must be at least ${EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH} characters."
+                                passErr = errTooShort
                             pass1 != pass2 ->
-                                passErr = "Passphrases do not match."
+                                passErr = errMismatch
                             else -> {
                                 pendingExportPassphrase = pass1
                                 showExportPassphraseDialog = false
@@ -842,7 +886,7 @@ fun SettingsScreen(
                         }
                     }
                 ) {
-                    Text("Continue")
+                    Text(lStr(R.string.continue_action))
                 }
             },
             dismissButton = {
@@ -858,17 +902,17 @@ fun SettingsScreen(
         var unlockPass by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { viewModel.dismissEncryptedImport() },
-            title = { Text("Unlock Encrypted Backup") },
+            title = { Text(lStr(R.string.unlock_backup_title)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Enter the passphrase used when this .delifarbak archive was created.",
+                        lStr(R.string.unlock_backup_body),
                         style = MaterialTheme.typography.bodySmall
                     )
                     OutlinedTextField(
                         value = unlockPass,
                         onValueChange = { unlockPass = it },
-                        label = { Text("Passphrase") },
+                        label = { Text(lStr(R.string.passphrase_label)) },
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -880,7 +924,7 @@ fun SettingsScreen(
                     enabled = unlockPass.length >= EncryptedArchiveBackupManager.MIN_PASSPHRASE_LENGTH,
                     onClick = { viewModel.unlockEncryptedArchive(unlockPass) }
                 ) {
-                    Text("Verify & Inspect")
+                    Text(lStr(R.string.verify_and_inspect))
                 }
             },
             dismissButton = {
@@ -898,28 +942,28 @@ fun SettingsScreen(
         var confirmCrossCompany by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { viewModel.dismissEncryptedImport() },
-            title = { Text("Restore Encrypted Backup") },
+            title = { Text(lStr(R.string.restore_backup_title)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Company: ${preview.backupCompanyName} (schema v${preview.dbSchemaVersion})",
+                        lStr(R.string.restore_backup_company, preview.backupCompanyName, preview.dbSchemaVersion),
                         style = MaterialTheme.typography.labelLarge
                     )
                     Text(
-                        "Stores: ${preview.newStores} new, ${preview.identicalStores} identical, ${preview.conflictingStores} conflicting",
+                        lStr(R.string.restore_backup_stores, preview.newStores, preview.identicalStores, preview.conflictingStores),
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        "Jobs: ${preview.newJobs} new, ${preview.identicalJobs} identical, ${preview.conflictingJobs} conflicting",
+                        lStr(R.string.restore_backup_jobs, preview.newJobs, preview.identicalJobs, preview.conflictingJobs),
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        "Invoices: ${preview.newInvoices} new, ${preview.identicalInvoices} identical, ${preview.conflictingInvoices} conflicting • ${preview.attachmentCount} verified files",
+                        lStr(R.string.restore_backup_invoices, preview.newInvoices, preview.identicalInvoices, preview.conflictingInvoices, preview.attachmentCount),
                         style = MaterialTheme.typography.bodySmall
                     )
                     if (preview.isCrossCompany) {
                         Text(
-                            "Warning: This backup belongs to a different company (${preview.backupCompanyName}). Cross-company merge is blocked unless explicitly confirmed.",
+                            lStr(R.string.restore_cross_company_warn, preview.backupCompanyName),
                             color = TerracottaError,
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -928,7 +972,7 @@ fun SettingsScreen(
                                 checked = confirmCrossCompany,
                                 onCheckedChange = { confirmCrossCompany = it }
                             )
-                            Text("Allow merging into active company", style = MaterialTheme.typography.bodySmall)
+                            Text(lStr(R.string.restore_allow_cross_company), style = MaterialTheme.typography.bodySmall)
                         }
                     }
                     if (preview.conflictingStores > 0 || preview.conflictingJobs > 0 || preview.conflictingInvoices > 0) {

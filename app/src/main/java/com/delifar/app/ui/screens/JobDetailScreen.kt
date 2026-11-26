@@ -4,11 +4,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -17,34 +16,33 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.ReportProblem
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,7 +58,6 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,17 +67,21 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.delifar.app.R
+import com.delifar.app.cloud.InvoiceSyncValidator
+import com.delifar.app.data.InvoiceStatus
 import com.delifar.app.data.InvoiceWithPages
-import com.delifar.app.data.JobIssue
 import com.delifar.app.data.JobStatus
 import com.delifar.app.data.JobWithItems
 import com.delifar.app.data.StoreWithHours
+import com.delifar.app.data.SyncState
+import com.delifar.app.documents.SignedPdfGenerator
 import com.delifar.app.domain.BusinessRules
 import com.delifar.app.domain.RolePermissions
 import com.delifar.app.ui.DeliFarViewModel
+import com.delifar.app.ui.components.ReceivingWindowStatusTag
+import com.delifar.app.ui.components.ReportIssueDialog
 import com.delifar.app.ui.components.StatusTag
 import com.delifar.app.ui.components.invoiceStatusColors
-import com.delifar.app.ui.components.invoiceStatusLabel
 import com.delifar.app.ui.components.issueLabel
 import com.delifar.app.ui.components.jobTypeLabel
 import com.delifar.app.ui.components.lStr
@@ -88,11 +89,18 @@ import com.delifar.app.ui.components.launchDialer
 import com.delifar.app.ui.components.launchDirections
 import com.delifar.app.ui.components.statusColors
 import com.delifar.app.ui.components.statusLabel
+import com.delifar.app.ui.components.todayHoursSummary
 import com.delifar.app.ui.theme.AmberAccent
 import com.delifar.app.ui.theme.AmberContainer
+import com.delifar.app.ui.theme.InfoBlue
+import com.delifar.app.ui.theme.InfoContainer
+import com.delifar.app.ui.theme.SuccessContainer
+import com.delifar.app.ui.theme.SuccessGreen
+import com.delifar.app.ui.theme.TerracottaContainer
 import com.delifar.app.ui.theme.TerracottaError
+import java.math.BigDecimal
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun JobDetailScreen(
     jobId: String,
@@ -108,11 +116,14 @@ fun JobDetailScreen(
     val context = LocalContext.current
     val prefs by viewModel.preferences.collectAsState()
     val employees by viewModel.employees.collectAsState()
+    val syncState by viewModel.syncState.collectAsState()
+    val invoiceAttachmentIssues by viewModel.invoiceAttachmentIssues.collectAsState()
     val zoneId = remember(prefs.companyTimezone) { BusinessRules.resolveZone(prefs.companyTimezone) }
     val today = remember(zoneId) { BusinessRules.todayInZone(zoneId) }
 
     val jobWithItems: JobWithItems? by viewModel.observeJob(jobId).collectAsState(initial = null)
     val jobInvoices: List<InvoiceWithPages> by viewModel.observeInvoicesForJob(jobId).collectAsState(initial = emptyList())
+    val invalidCoordMsg = lStr(R.string.invalid_store_coordinates)
 
     var showRescheduleDialog by remember { mutableStateOf(false) }
     var showIssueDialog by remember { mutableStateOf(false) }
@@ -215,6 +226,21 @@ fun JobDetailScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium
                         )
+                        if (liveStore != null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${lStr(R.string.receiving_hours)}: ${todayHoursSummary(liveStore.hours, zoneId)}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                ReceivingWindowStatusTag(hours = liveStore.hours, zoneId = zoneId)
+                            }
+                        }
                         if (job.notes.isNotBlank()) {
                             Text(
                                 text = job.notes,
@@ -275,21 +301,31 @@ fun JobDetailScreen(
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
-                                onClick = { launchDirections(context, storeLat, storeLon, storeName, storeAddress) }
+                                onClick = {
+                                    val ok = launchDirections(context, storeLat, storeLon, storeName, storeAddress)
+                                    if (!ok) viewModel.notifyMessage(invalidCoordMsg)
+                                },
+                                modifier = Modifier.defaultMinSize(minHeight = 44.dp)
                             ) {
                                 Icon(Icons.Default.Directions, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text(lStr(R.string.directions))
                             }
                             if (storePhone.isNotBlank()) {
-                                OutlinedButton(onClick = { launchDialer(context, storePhone) }) {
+                                OutlinedButton(
+                                    onClick = { launchDialer(context, storePhone) },
+                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                ) {
                                     Icon(Icons.Default.Call, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(4.dp))
                                     Text(lStr(R.string.call_store))
                                 }
                             }
                             if (liveStore != null) {
-                                TextButton(onClick = { onOpenStore(liveStore.store.id) }) {
+                                TextButton(
+                                    onClick = { onOpenStore(liveStore.store.id) },
+                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                ) {
                                     Text(lStr(R.string.store_details))
                                 }
                             }
@@ -357,14 +393,38 @@ fun JobDetailScreen(
 
                         if (jobInvoices.isEmpty()) {
                             Text(
-                                text = lStr(R.string.no_invoices_yet),
+                                text = lStr(R.string.no_invoices_for_job),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         } else {
                             jobInvoices.forEach { iwp ->
                                 val inv = iwp.invoice
-                                val (stBg, stFg) = invoiceStatusColors(inv.status)
+                                val isUploadingNow = syncState.currentlyUploadingInvoiceId == inv.id
+                                val hasAllRemote = remember(iwp) { InvoiceSyncValidator.hasAllRemoteAttachments(iwp) }
+                                val localIssues = invoiceAttachmentIssues[inv.id].orEmpty()
+                                val (displayStatusText, stBg, stFg) = when {
+                                    isUploadingNow -> Triple(lStr(R.string.invoice_status_uploading), InfoContainer, InfoBlue)
+                                    inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED ->
+                                        Triple(lStr(R.string.invoice_status_upload_failed), TerracottaContainer, TerracottaError)
+                                    inv.status == InvoiceStatus.VOIDED ->
+                                        Triple(lStr(R.string.invoice_status_voided), invoiceStatusColors(inv.status).first, invoiceStatusColors(inv.status).second)
+                                    inv.signed && inv.status == InvoiceStatus.SYNCHRONIZED && inv.syncState == SyncState.SYNCED && hasAllRemote ->
+                                        Triple(lStr(R.string.invoice_status_signed_synced), SuccessContainer, SuccessGreen)
+                                    inv.status == InvoiceStatus.SYNCHRONIZED && inv.syncState == SyncState.SYNCED && hasAllRemote ->
+                                        Triple(lStr(R.string.invoice_status_uploaded), SuccessContainer, SuccessGreen)
+                                    inv.companyId.isNotBlank() && (inv.status == InvoiceStatus.PENDING_UPLOAD || inv.syncState == SyncState.PENDING) ->
+                                        Triple(lStr(R.string.invoice_status_pending_upload), InfoContainer, InfoBlue)
+                                    else ->
+                                        Triple(lStr(R.string.invoice_status_saved_locally), invoiceStatusColors(inv.status).first, invoiceStatusColors(inv.status).second)
+                                }
+                                val needsRetry = !isUploadingNow && inv.companyId.isNotBlank() && (
+                                    inv.status == InvoiceStatus.UPLOAD_FAILED ||
+                                        inv.syncState == SyncState.FAILED ||
+                                        inv.status == InvoiceStatus.PENDING_UPLOAD ||
+                                        !inv.uploadError.isNullOrBlank()
+                                    )
+
                                 Surface(
                                     shape = RoundedCornerShape(10.dp),
                                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
@@ -372,32 +432,91 @@ fun JobDetailScreen(
                                         .fillMaxWidth()
                                         .clickable(onClick = onOpenInvoices)
                                 ) {
-                                    Row(
+                                    Column(
                                         modifier = Modifier.padding(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "#${inv.invoiceNumber} (v${inv.version})",
+                                                    style = MaterialTheme.typography.titleMedium
+                                                )
+                                                Text(
+                                                    text = if (inv.signed) lStr(R.string.invoice_signed_by, inv.recipientName)
+                                                    else lStr(R.string.invoice_pages_count, iwp.pages.size),
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            StatusTag(text = displayStatusText, bg = stBg, fg = stFg)
+                                        }
+
+                                        val errDetail = inv.uploadError?.takeIf { it.isNotBlank() } ?: localIssues.firstOrNull()
+                                        if (errDetail != null && (inv.status == InvoiceStatus.UPLOAD_FAILED || inv.syncState == SyncState.FAILED || localIssues.isNotEmpty())) {
                                             Text(
-                                                text = "#${inv.invoiceNumber} (v${inv.version})",
-                                                style = MaterialTheme.typography.titleMedium
-                                            )
-                                            Text(
-                                                text = if (inv.signed) "Signed by ${inv.recipientName}" else "${iwp.pages.size} page(s)",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                text = errDetail,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = TerracottaError
                                             )
                                         }
-                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            StatusTag(text = invoiceStatusLabel(inv.status), bg = stBg, fg = stFg)
-                                            if (!inv.signed && canUploadAndSign) {
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            if (!inv.signed && inv.status != InvoiceStatus.VOIDED && canUploadAndSign) {
                                                 Button(
                                                     onClick = { onSignInvoice(inv.id) },
-                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .defaultMinSize(minHeight = 44.dp)
                                                 ) {
                                                     Icon(Icons.Default.Draw, contentDescription = null, modifier = Modifier.size(14.dp))
                                                     Spacer(Modifier.width(4.dp))
-                                                    Text(lStr(R.string.collect_signature), style = MaterialTheme.typography.labelMedium)
+                                                    Text(lStr(R.string.collect_signature), style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                                                }
+                                            }
+                                            if (needsRetry) {
+                                                OutlinedButton(
+                                                    onClick = { viewModel.retryInvoiceUpload(inv.id) },
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                                ) {
+                                                    Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text(lStr(R.string.retry_upload), style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                                                }
+                                            }
+                                            val pdfPath = inv.signedPdfLocalPath
+                                            if (!pdfPath.isNullOrBlank()) {
+                                                OutlinedButton(
+                                                    onClick = { SignedPdfGenerator.openFile(context, pdfPath, "application/pdf") },
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                                ) {
+                                                    Icon(Icons.Default.PictureAsPdf, contentDescription = lStr(R.string.view_signed_pdf), modifier = Modifier.size(16.dp))
+                                                }
+                                                OutlinedButton(
+                                                    onClick = { SignedPdfGenerator.printPdf(context, pdfPath, "DeliFar-${inv.invoiceNumber}") },
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                                ) {
+                                                    Icon(Icons.Default.Print, contentDescription = lStr(R.string.print_pdf), modifier = Modifier.size(16.dp))
+                                                }
+                                                val sharePdfTitle = lStr(R.string.share_pdf)
+                                                OutlinedButton(
+                                                    onClick = { SignedPdfGenerator.shareFile(context, pdfPath, "application/pdf", sharePdfTitle) },
+                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                    modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                                                ) {
+                                                    Icon(Icons.Default.Share, contentDescription = sharePdfTitle, modifier = Modifier.size(16.dp))
                                                 }
                                             }
                                         }
@@ -507,6 +626,14 @@ fun JobDetailScreen(
                 )
             }
             items(jwi.sortedItems, key = { it.id }) { line ->
+                val varianceLabel = remember(line.planned, line.actual) {
+                    val actualStr = line.actual ?: return@remember null
+                    runCatching {
+                        val diff = BigDecimal(actualStr).subtract(BigDecimal(line.planned)).stripTrailingZeros()
+                        val sign = if (diff.signum() > 0) "+" else ""
+                        "$sign${diff.toPlainString()} ${line.unit}"
+                    }.getOrNull()
+                }
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surface,
@@ -528,11 +655,21 @@ fun JobDetailScreen(
                             )
                         }
                         if (line.actual != null) {
-                            StatusTag(
-                                text = "${lStr(R.string.actual_qty)}: ${line.actual} ${line.unit}",
-                                bg = AmberContainer,
-                                fg = AmberAccent
-                            )
+                            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                StatusTag(
+                                    text = "${lStr(R.string.actual_qty)}: ${line.actual} ${line.unit}",
+                                    bg = AmberContainer,
+                                    fg = AmberAccent
+                                )
+                                if (varianceLabel != null) {
+                                    Text(
+                                        text = "${lStr(R.string.variance_prefix)} $varianceLabel",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TerracottaError,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -576,86 +713,20 @@ fun JobDetailScreen(
         }
 
         if (showIssueDialog) {
-            var selectedIssue by remember { mutableStateOf(job.issue ?: JobIssue.PARTIAL) }
-            var note by remember { mutableStateOf(job.issueNote) }
-            var keepOpen by remember { mutableStateOf(true) }
-            val actuals = remember(jwi.sortedItems) {
-                mutableStateMapOf<String, String>().apply {
-                    jwi.sortedItems.forEach { this[it.id] = it.actual ?: it.planned }
-                }
-            }
-
-            AlertDialog(
-                onDismissRequest = { showIssueDialog = false },
-                title = { Text(lStr(R.string.action_report_issue)) },
-                text = {
-                    Column(
-                        modifier = Modifier.verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            listOf(
-                                JobIssue.PARTIAL,
-                                JobIssue.CLOSED,
-                                JobIssue.REFUSED,
-                                JobIssue.UNAVAILABLE,
-                                JobIssue.DAMAGED,
-                                JobIssue.UNSIGNED,
-                                JobIssue.OTHER
-                            ).forEach { issue ->
-                                FilterChip(
-                                    selected = selectedIssue == issue,
-                                    onClick = { selectedIssue = issue },
-                                    label = { Text(issueLabel(issue)) }
-                                )
-                            }
-                        }
-
-                        if (selectedIssue == JobIssue.PARTIAL) {
-                            HorizontalDivider()
-                            jwi.sortedItems.forEach { line ->
-                                OutlinedTextField(
-                                    value = actuals[line.id] ?: "0",
-                                    onValueChange = { actuals[line.id] = it },
-                                    label = { Text("${line.name} (${lStr(R.string.planned_qty)} ${line.planned} ${line.unit})") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-                        }
-
-                        OutlinedTextField(
-                            value = note,
-                            onValueChange = { note = it },
-                            label = { Text(lStr(R.string.issue_note_label)) },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = keepOpen, onCheckedChange = { keepOpen = it })
-                            Text(lStr(R.string.keep_work_open), style = MaterialTheme.typography.bodyMedium)
-                        }
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            viewModel.reportIssue(
-                                jobId = job.id,
-                                issueType = selectedIssue,
-                                note = note,
-                                keepOpen = keepOpen,
-                                actuals = actuals.toMap(),
-                                onDone = { showIssueDialog = false }
-                            )
-                        }
-                    ) { Text(lStr(R.string.save)) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showIssueDialog = false }) { Text(lStr(R.string.cancel)) }
+            ReportIssueDialog(
+                items = jwi.sortedItems,
+                initialIssue = job.issue,
+                initialNote = job.issueNote,
+                onDismiss = { showIssueDialog = false },
+                onSubmit = { issueType, note, keepOpen, actuals ->
+                    viewModel.reportIssue(
+                        jobId = job.id,
+                        issueType = issueType,
+                        note = note,
+                        keepOpen = keepOpen,
+                        actuals = actuals,
+                        onDone = { showIssueDialog = false }
+                    )
                 }
             )
         }

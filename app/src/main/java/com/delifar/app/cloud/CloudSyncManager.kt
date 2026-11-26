@@ -3,6 +3,7 @@ package com.delifar.app.cloud
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import androidx.room.withTransaction
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
@@ -36,9 +37,11 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
 import com.google.firebase.storage.StorageMetadata
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -180,8 +183,12 @@ class CloudSyncManager(
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val listenerLock = Any()
     private val listeners = mutableListOf<ListenerRegistration>()
+    @Volatile
     private var activeCompanyId: String = ""
+    @Volatile
+    private var listenerGeneration: Long = 0L
 
     private val _syncState = MutableStateFlow(
         CloudSyncUiState(
@@ -266,7 +273,10 @@ class CloudSyncManager(
             return
         }
         val fs = FirebaseServices.firestoreOrNull() ?: return
-        activeCompanyId = companyId
+        val gen = synchronized(listenerLock) {
+            activeCompanyId = companyId
+            ++listenerGeneration
+        }
 
         _syncState.value = _syncState.value.copy(
             firebaseConfigured = true,
@@ -277,6 +287,7 @@ class CloudSyncManager(
 
         scope.launch {
             val check = FirebaseServices.testConnectionDetailed(context, companyId)
+            if (listenerGeneration != gen || activeCompanyId != companyId) return@launch
             val reachable = check.health == BackendHealth.REACHABLE
             val pendingNow = runCatching { db.syncQueueDao().getPendingCountNow(companyId) }.getOrDefault(0)
             val failedNow = runCatching { db.syncQueueDao().getFailedCountNow(companyId) }.getOrDefault(0)
@@ -294,6 +305,7 @@ class CloudSyncManager(
                     repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, check.detail)
                 }
             }
+            if (listenerGeneration != gen || activeCompanyId != companyId) return@launch
             _syncState.value = _syncState.value.copy(
                 firebaseConfigured = true,
                 isAuthenticated = check.health != BackendHealth.NOT_SIGNED_IN && FirebaseServices.isAuthenticated,
@@ -306,15 +318,18 @@ class CloudSyncManager(
         }
 
         val companyRef = fs.collection("companies").document(companyId)
+        val registered = mutableListOf<ListenerRegistration>()
 
         // 1. Company metadata
-        listeners += companyRef.addSnapshotListener { snap, err ->
+        registered += companyRef.addSnapshotListener { snap, err ->
+            if (listenerGeneration != gen || activeCompanyId != companyId) return@addSnapshotListener
             if (err != null) {
                 recordListenerError(err, OperationType.GET, "companies/$companyId")
                 return@addSnapshotListener
             }
             if (snap != null && snap.exists()) {
                 scope.launch {
+                    if (listenerGeneration != gen || activeCompanyId != companyId) return@launch
                     val entity = CompanyEntity(
                         id = snap.id,
                         name = snap.getString("name") ?: "Company",
@@ -332,63 +347,69 @@ class CloudSyncManager(
         }
 
         // 2. Stores
-        listeners += companyRef.collection("stores").limit(500).addSnapshotListener { snaps, err ->
+        registered += companyRef.collection("stores").limit(500).addSnapshotListener { snaps, err ->
+            if (listenerGeneration != gen || activeCompanyId != companyId) return@addSnapshotListener
             if (err != null) {
                 recordListenerError(err, OperationType.LIST, "companies/$companyId/stores")
                 return@addSnapshotListener
             }
             if (snaps == null) return@addSnapshotListener
             scope.launch {
-                for (doc in snaps.documents) {
-                    val remoteVersion = (doc.getLong("version") ?: 1L).toInt()
-                    val remoteMod = doc.getLong("modified") ?: 0L
-                    val local = db.storeDao().getStore(doc.id)
-                    if (local != null && local.syncState == SyncState.PENDING && local.version > remoteVersion) {
-                        continue // Keep newer local edit queued for upload
-                    }
-                    if (local != null && local.version == remoteVersion && local.modified > remoteMod) {
-                        continue
-                    }
-                    val serverTs = (doc.get("serverUpdatedAt") as? Timestamp)?.toDate()?.time
-                    val store = StoreEntity(
-                        id = doc.id,
-                        name = doc.getString("name") ?: continue,
-                        address = doc.getString("address") ?: "",
-                        lat = doc.getDouble("lat") ?: 0.0,
-                        lon = doc.getDouble("lon") ?: 0.0,
-                        providerId = doc.getString("providerId"),
-                        phone = doc.getString("phone") ?: "",
-                        created = doc.getLong("created") ?: remoteMod,
-                        modified = remoteMod,
-                        archived = doc.getBoolean("archived") ?: false,
-                        companyId = companyId,
-                        syncState = SyncState.SYNCED,
-                        serverUpdatedAt = serverTs,
-                        updatedByUid = doc.getString("updatedByUid") ?: "",
-                        version = remoteVersion,
-                        locationConfirmed = doc.getBoolean("locationConfirmed") ?: true,
-                        geocodeSource = doc.getString("geocodeSource") ?: "cloud"
-                    )
-                    db.storeDao().upsertStore(store)
-                    @Suppress("UNCHECKED_CAST")
-                    val hoursList = doc.get("hours") as? List<Map<String, Any?>>
-                    if (hoursList != null) {
-                        val parsedHours = hoursList.mapNotNull { m ->
-                            val day = (m["day"] as? Number)?.toInt() ?: return@mapNotNull null
-                            StoreHoursEntity(
-                                storeId = doc.id,
-                                day = day,
-                                mode = (m["mode"] as? String) ?: HoursMode.UNKNOWN,
-                                windows = (m["windows"] as? String) ?: ""
-                            )
+                if (listenerGeneration != gen || activeCompanyId != companyId) return@launch
+                db.withTransaction {
+                    for (doc in snaps.documents) {
+                        val remoteVersion = (doc.getLong("version") ?: 1L).toInt()
+                        val remoteMod = doc.getLong("modified") ?: 0L
+                        val local = db.storeDao().getStore(doc.id)
+                        if (local != null && local.syncState == SyncState.PENDING && local.version > remoteVersion) {
+                            continue // Keep newer local edit queued for upload
                         }
-                        if (parsedHours.isNotEmpty()) {
-                            db.storeDao().deleteHoursForStore(doc.id)
-                            db.storeDao().upsertHours(parsedHours)
+                        if (local != null && local.version == remoteVersion && local.modified > remoteMod) {
+                            continue
+                        }
+                        val serverTs = (doc.get("serverUpdatedAt") as? Timestamp)?.toDate()?.time
+                        val store = StoreEntity(
+                            id = doc.id,
+                            name = doc.getString("name") ?: continue,
+                            address = doc.getString("address") ?: "",
+                            lat = doc.getDouble("lat") ?: 0.0,
+                            lon = doc.getDouble("lon") ?: 0.0,
+                            providerId = doc.getString("providerId"),
+                            phone = doc.getString("phone") ?: "",
+                            created = doc.getLong("created") ?: remoteMod,
+                            modified = remoteMod,
+                            archived = doc.getBoolean("archived") ?: false,
+                            companyId = companyId,
+                            syncState = SyncState.SYNCED,
+                            serverUpdatedAt = serverTs,
+                            updatedByUid = doc.getString("updatedByUid") ?: "",
+                            version = remoteVersion,
+                            locationConfirmed = doc.getBoolean("locationConfirmed") ?: true,
+                            geocodeSource = doc.getString("geocodeSource") ?: "cloud"
+                        )
+                        db.storeDao().upsertStore(store)
+                        @Suppress("UNCHECKED_CAST")
+                        val hoursList = doc.get("hours") as? List<Map<String, Any?>>
+                        if (hoursList != null) {
+                            val parsedHours = hoursList.mapNotNull { m ->
+                                val day = (m["day"] as? Number)?.toInt() ?: return@mapNotNull null
+                                StoreHoursEntity(
+                                    storeId = doc.id,
+                                    day = day,
+                                    mode = (m["mode"] as? String) ?: HoursMode.UNKNOWN,
+                                    windows = (m["windows"] as? String) ?: ""
+                                )
+                            }
+                            if (parsedHours.isNotEmpty()) {
+                                db.storeDao().deleteHoursForStore(doc.id)
+                                db.storeDao().upsertHours(parsedHours)
+                            }
                         }
                     }
                 }
-                _syncState.value = _syncState.value.copy(isOnline = true, lastSyncedAt = System.currentTimeMillis())
+                if (listenerGeneration == gen && activeCompanyId == companyId) {
+                    _syncState.value = _syncState.value.copy(isOnline = true, lastSyncedAt = System.currentTimeMillis())
+                }
             }
         }
 
@@ -398,68 +419,76 @@ class CloudSyncManager(
         } else {
             companyRef.collection("jobs").limit(500)
         }
-        listeners += jobsQuery.addSnapshotListener { snaps, err ->
+        registered += jobsQuery.addSnapshotListener { snaps, err ->
+            if (listenerGeneration != gen || activeCompanyId != companyId) return@addSnapshotListener
             if (err != null) {
-                FirebaseServices.handleFirestoreError(err, OperationType.LIST, "companies/$companyId/jobs")
+                recordListenerError(err, OperationType.LIST, "companies/$companyId/jobs")
                 return@addSnapshotListener
             }
             if (snaps == null) return@addSnapshotListener
             scope.launch {
-                for (doc in snaps.documents) {
-                    val remoteVersion = (doc.getLong("version") ?: 1L).toInt()
-                    val local = db.jobDao().getJobWithItems(doc.id)?.job
-                    if (local != null && local.syncState == SyncState.PENDING && local.version > remoteVersion) {
-                        continue
-                    }
-                    val storeId = doc.getString("storeId") ?: continue
-                    if (db.storeDao().getStore(storeId) == null) continue // Wait for parent store FK
-                    val serverTs = (doc.get("serverUpdatedAt") as? Timestamp)?.toDate()?.time
-                    val job = JobEntity(
-                        id = doc.id,
-                        storeId = storeId,
-                        type = doc.getString("type") ?: JobType.DELIVERY,
-                        date = doc.getString("date") ?: "",
-                        time = doc.getString("time"),
-                        status = doc.getString("status") ?: JobStatus.PENDING,
-                        issue = doc.getString("issue"),
-                        issueNote = doc.getString("issueNote") ?: "",
-                        snapshotName = doc.getString("snapshotName") ?: "",
-                        snapshotAddress = doc.getString("snapshotAddress") ?: "",
-                        snapshotLat = doc.getDouble("snapshotLat") ?: 0.0,
-                        snapshotLon = doc.getDouble("snapshotLon") ?: 0.0,
-                        created = doc.getLong("created") ?: System.currentTimeMillis(),
-                        modified = doc.getLong("modified") ?: System.currentTimeMillis(),
-                        completed = doc.getLong("completed"),
-                        reminderVersion = doc.getString("reminderVersion") ?: "v1",
-                        reminderEnabled = doc.getBoolean("reminderEnabled") ?: true,
-                        companyId = companyId,
-                        assignedDriverUid = doc.getString("assignedDriverUid"),
-                        assignedDriverName = doc.getString("assignedDriverName") ?: "",
-                        notes = doc.getString("notes") ?: "",
-                        syncState = SyncState.SYNCED,
-                        serverUpdatedAt = serverTs,
-                        updatedByUid = doc.getString("updatedByUid") ?: "",
-                        version = remoteVersion
-                    )
-                    db.jobDao().upsertJob(job)
-                    @Suppress("UNCHECKED_CAST")
-                    val itemsList = doc.get("items") as? List<Map<String, Any?>>
-                    if (itemsList != null) {
-                        val parsedItems = itemsList.mapIndexedNotNull { idx, m ->
-                            val itemId = (m["id"] as? String) ?: return@mapIndexedNotNull null
-                            JobItemEntity(
-                                id = itemId,
-                                jobId = doc.id,
-                                position = (m["position"] as? Number)?.toInt() ?: idx,
-                                name = (m["name"] as? String) ?: "",
-                                planned = (m["planned"] as? String) ?: "1",
-                                unit = (m["unit"] as? String) ?: "ea",
-                                actual = m["actual"] as? String
-                            )
+                if (listenerGeneration != gen || activeCompanyId != companyId) return@launch
+                db.withTransaction {
+                    for (doc in snaps.documents) {
+                        val remoteVersion = (doc.getLong("version") ?: 1L).toInt()
+                        val remoteMod = doc.getLong("modified") ?: 0L
+                        val local = db.jobDao().getJobWithItems(doc.id)?.job
+                        if (local != null && local.syncState == SyncState.PENDING && local.version > remoteVersion) {
+                            continue
                         }
-                        if (parsedItems.isNotEmpty()) {
-                            db.jobDao().deleteItemsForJob(doc.id)
-                            db.jobDao().upsertItems(parsedItems)
+                        if (local != null && local.version == remoteVersion && local.modified > remoteMod) {
+                            continue
+                        }
+                        val storeId = doc.getString("storeId") ?: continue
+                        if (db.storeDao().getStore(storeId) == null) continue // Wait for parent store FK
+                        val serverTs = (doc.get("serverUpdatedAt") as? Timestamp)?.toDate()?.time
+                        val job = JobEntity(
+                            id = doc.id,
+                            storeId = storeId,
+                            type = doc.getString("type") ?: JobType.DELIVERY,
+                            date = doc.getString("date") ?: "",
+                            time = doc.getString("time"),
+                            status = doc.getString("status") ?: JobStatus.PENDING,
+                            issue = doc.getString("issue"),
+                            issueNote = doc.getString("issueNote") ?: "",
+                            snapshotName = doc.getString("snapshotName") ?: "",
+                            snapshotAddress = doc.getString("snapshotAddress") ?: "",
+                            snapshotLat = doc.getDouble("snapshotLat") ?: 0.0,
+                            snapshotLon = doc.getDouble("snapshotLon") ?: 0.0,
+                            created = doc.getLong("created") ?: System.currentTimeMillis(),
+                            modified = remoteMod.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                            completed = doc.getLong("completed"),
+                            reminderVersion = doc.getString("reminderVersion") ?: "v1",
+                            reminderEnabled = doc.getBoolean("reminderEnabled") ?: true,
+                            companyId = companyId,
+                            assignedDriverUid = doc.getString("assignedDriverUid"),
+                            assignedDriverName = doc.getString("assignedDriverName") ?: "",
+                            notes = doc.getString("notes") ?: "",
+                            syncState = SyncState.SYNCED,
+                            serverUpdatedAt = serverTs,
+                            updatedByUid = doc.getString("updatedByUid") ?: "",
+                            version = remoteVersion
+                        )
+                        db.jobDao().upsertJob(job)
+                        @Suppress("UNCHECKED_CAST")
+                        val itemsList = doc.get("items") as? List<Map<String, Any?>>
+                        if (itemsList != null) {
+                            val parsedItems = itemsList.mapIndexedNotNull { idx, m ->
+                                val itemId = (m["id"] as? String) ?: return@mapIndexedNotNull null
+                                JobItemEntity(
+                                    id = itemId,
+                                    jobId = doc.id,
+                                    position = (m["position"] as? Number)?.toInt() ?: idx,
+                                    name = (m["name"] as? String) ?: "",
+                                    planned = (m["planned"] as? String) ?: "1",
+                                    unit = (m["unit"] as? String) ?: "ea",
+                                    actual = m["actual"] as? String
+                                )
+                            }
+                            if (parsedItems.isNotEmpty()) {
+                                db.jobDao().deleteItemsForJob(doc.id)
+                                db.jobDao().upsertItems(parsedItems)
+                            }
                         }
                     }
                 }
@@ -467,13 +496,15 @@ class CloudSyncManager(
         }
 
         // 4. Employees
-        listeners += companyRef.collection("employees").limit(200).addSnapshotListener { snaps, err ->
+        registered += companyRef.collection("employees").limit(200).addSnapshotListener { snaps, err ->
+            if (listenerGeneration != gen || activeCompanyId != companyId) return@addSnapshotListener
             if (err != null) {
-                FirebaseServices.handleFirestoreError(err, OperationType.LIST, "companies/$companyId/employees")
+                recordListenerError(err, OperationType.LIST, "companies/$companyId/employees")
                 return@addSnapshotListener
             }
             if (snaps == null) return@addSnapshotListener
             scope.launch {
+                if (listenerGeneration != gen || activeCompanyId != companyId) return@launch
                 val list = snaps.documents.map { doc ->
                     EmployeeEntity(
                         uid = doc.id,
@@ -504,86 +535,97 @@ class CloudSyncManager(
             listOf(companyRef.collection("invoices").limit(500))
         }
         for (invoiceQuery in invoiceQueries) {
-            listeners += invoiceQuery.addSnapshotListener { snaps, err ->
+            registered += invoiceQuery.addSnapshotListener { snaps, err ->
+                if (listenerGeneration != gen || activeCompanyId != companyId) return@addSnapshotListener
                 if (err != null) {
-                    FirebaseServices.handleFirestoreError(err, OperationType.LIST, "companies/$companyId/invoices")
+                    recordListenerError(err, OperationType.LIST, "companies/$companyId/invoices")
                     return@addSnapshotListener
                 }
                 if (snaps == null) return@addSnapshotListener
                 scope.launch {
-                    for (doc in snaps.documents) {
-                        val existingWithPages = db.invoiceDao().getInvoiceWithPages(doc.id)
-                        val local = existingWithPages?.invoice
-                        val remoteSigned = doc.getBoolean("signed") ?: false
-                        // Never allow an unsigned remote doc to overwrite a locally signed invoice
-                        if (local != null && local.signed && !remoteSigned) continue
-                        val serverTs = (doc.get("serverUpdatedAt") as? Timestamp)?.toDate()?.time
-                        val signedServerTs = (doc.get("signedServerAt") as? Timestamp)?.toDate()?.time
-                        val entity = InvoiceEntity(
-                            id = doc.id,
-                            companyId = companyId,
-                            jobId = doc.getString("jobId"),
-                            storeId = doc.getString("storeId") ?: "",
-                            storeName = doc.getString("storeName") ?: "",
-                            invoiceNumber = doc.getString("invoiceNumber") ?: "",
-                            notes = doc.getString("notes") ?: "",
-                            status = doc.getString("status") ?: InvoiceStatus.SYNCHRONIZED,
-                            version = (doc.getLong("version") ?: 1L).toInt(),
-                            supersedesInvoiceId = doc.getString("supersedesInvoiceId"),
-                            voidedReason = doc.getString("voidedReason"),
-                            createdByUid = doc.getString("createdByUid") ?: "",
-                            createdByName = doc.getString("createdByName") ?: "",
-                            createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
-                            modifiedAt = doc.getLong("modifiedAt") ?: System.currentTimeMillis(),
-                            signed = remoteSigned,
-                            recipientName = doc.getString("recipientName") ?: "",
-                            recipientTitle = doc.getString("recipientTitle") ?: "",
-                            acknowledgmentConfirmed = doc.getBoolean("acknowledgmentConfirmed") ?: false,
-                            signatureLocalPath = local?.signatureLocalPath,
-                            signatureStoragePath = doc.getString("signatureStoragePath"),
-                            signaturePageIndex = (doc.getLong("signaturePageIndex") ?: 0L).toInt(),
-                            signaturePosX = (doc.getDouble("signaturePosX") ?: 0.5).toFloat(),
-                            signaturePosY = (doc.getDouble("signaturePosY") ?: 0.82).toFloat(),
-                            signedLocalAt = doc.getLong("signedLocalAt") ?: local?.signedLocalAt,
-                            signedServerAt = signedServerTs ?: local?.signedServerAt,
-                            signedPdfLocalPath = local?.signedPdfLocalPath,
-                            signedPdfStoragePath = doc.getString("signedPdfStoragePath"),
-                            signedPdfSha256 = doc.getString("signedPdfSha256") ?: local?.signedPdfSha256,
-                            totalBytes = doc.getLong("totalBytes") ?: local?.totalBytes ?: 0L,
-                            syncState = SyncState.SYNCED,
-                            serverUpdatedAt = serverTs,
-                            uploadError = null,
-                            assignedDriverUid = doc.getString("assignedDriverUid") ?: local?.assignedDriverUid
-                        )
-                        db.invoiceDao().upsertInvoice(entity)
+                    if (listenerGeneration != gen || activeCompanyId != companyId) return@launch
+                    db.withTransaction {
+                        for (doc in snaps.documents) {
+                            val existingWithPages = db.invoiceDao().getInvoiceWithPages(doc.id)
+                            val local = existingWithPages?.invoice
+                            val remoteSigned = doc.getBoolean("signed") ?: false
+                            val remoteStatus = doc.getString("status") ?: InvoiceStatus.SYNCHRONIZED
+                            val remoteMod = doc.getLong("modifiedAt") ?: 0L
+                            // Never allow an unsigned remote doc to overwrite a locally signed invoice
+                            if (local != null && local.signed && !remoteSigned) continue
+                            // Never allow a non-voided remote doc to overwrite a pending local void
+                            if (local != null && local.status == InvoiceStatus.VOIDED && remoteStatus != InvoiceStatus.VOIDED) continue
+                            // Preserve newer pending/failed local edits until uploaded
+                            if (local != null && local.syncState != SyncState.SYNCED && local.modifiedAt > remoteMod) continue
 
-                        // Hydrate remote page metadata while preserving any local cached image paths
-                        @Suppress("UNCHECKED_CAST")
-                        val remotePages = doc.get("pages") as? List<Map<String, Any?>>
-                        if (!remotePages.isNullOrEmpty()) {
-                            val localPagesById = existingWithPages?.pages?.associateBy { it.id }.orEmpty()
-                            val mergedPages = remotePages.mapIndexedNotNull { idx, m ->
-                                val pid = (m["id"] as? String)?.ifBlank { null } ?: return@mapIndexedNotNull null
-                                val lp = localPagesById[pid]
-                                InvoicePageEntity(
-                                    id = pid,
-                                    invoiceId = doc.id,
-                                    pageIndex = (m["pageIndex"] as? Number)?.toInt() ?: idx,
-                                    originalLocalPath = lp?.originalLocalPath.orEmpty(),
-                                    editedLocalPath = lp?.editedLocalPath.orEmpty(),
-                                    originalStoragePath = (m["originalStoragePath"] as? String) ?: lp?.originalStoragePath,
-                                    editedStoragePath = (m["editedStoragePath"] as? String) ?: lp?.editedStoragePath,
-                                    originalSha256 = (m["originalSha256"] as? String) ?: lp?.originalSha256.orEmpty(),
-                                    editedSha256 = (m["editedSha256"] as? String) ?: lp?.editedSha256.orEmpty(),
-                                    rotationDegrees = lp?.rotationDegrees ?: 0,
-                                    contrastBoost = lp?.contrastBoost ?: false,
-                                    cropInsetPercent = lp?.cropInsetPercent ?: 0,
-                                    byteSize = (m["byteSize"] as? Number)?.toLong() ?: lp?.byteSize ?: 0L,
-                                    mimeType = lp?.mimeType ?: "image/jpeg"
-                                )
-                            }
-                            if (mergedPages.isNotEmpty()) {
-                                db.invoiceDao().upsertPages(mergedPages)
+                            val serverTs = (doc.get("serverUpdatedAt") as? Timestamp)?.toDate()?.time
+                            val signedServerTs = (doc.get("signedServerAt") as? Timestamp)?.toDate()?.time
+                            val entity = InvoiceEntity(
+                                id = doc.id,
+                                companyId = companyId,
+                                jobId = doc.getString("jobId"),
+                                storeId = doc.getString("storeId") ?: "",
+                                storeName = doc.getString("storeName") ?: "",
+                                invoiceNumber = doc.getString("invoiceNumber") ?: "",
+                                notes = doc.getString("notes") ?: "",
+                                status = remoteStatus,
+                                version = (doc.getLong("version") ?: 1L).toInt(),
+                                supersedesInvoiceId = doc.getString("supersedesInvoiceId"),
+                                voidedReason = doc.getString("voidedReason"),
+                                createdByUid = doc.getString("createdByUid") ?: "",
+                                createdByName = doc.getString("createdByName") ?: "",
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
+                                modifiedAt = remoteMod.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                                signed = remoteSigned,
+                                recipientName = doc.getString("recipientName") ?: "",
+                                recipientTitle = doc.getString("recipientTitle") ?: "",
+                                acknowledgmentConfirmed = doc.getBoolean("acknowledgmentConfirmed") ?: false,
+                                signatureLocalPath = local?.signatureLocalPath,
+                                signatureStoragePath = doc.getString("signatureStoragePath"),
+                                signaturePageIndex = (doc.getLong("signaturePageIndex") ?: 0L).toInt(),
+                                signaturePosX = (doc.getDouble("signaturePosX") ?: 0.5).toFloat(),
+                                signaturePosY = (doc.getDouble("signaturePosY") ?: 0.82).toFloat(),
+                                signedLocalAt = doc.getLong("signedLocalAt") ?: local?.signedLocalAt,
+                                signedServerAt = signedServerTs ?: local?.signedServerAt,
+                                signedPdfLocalPath = local?.signedPdfLocalPath,
+                                signedPdfStoragePath = doc.getString("signedPdfStoragePath"),
+                                signedPdfSha256 = doc.getString("signedPdfSha256") ?: local?.signedPdfSha256,
+                                totalBytes = doc.getLong("totalBytes") ?: local?.totalBytes ?: 0L,
+                                syncState = SyncState.SYNCED,
+                                serverUpdatedAt = serverTs,
+                                uploadError = null,
+                                assignedDriverUid = doc.getString("assignedDriverUid") ?: local?.assignedDriverUid
+                            )
+                            db.invoiceDao().upsertInvoice(entity)
+
+                            // Hydrate remote page metadata while preserving any local cached image paths
+                            @Suppress("UNCHECKED_CAST")
+                            val remotePages = doc.get("pages") as? List<Map<String, Any?>>
+                            if (!remotePages.isNullOrEmpty()) {
+                                val localPagesById = existingWithPages?.pages?.associateBy { it.id }.orEmpty()
+                                val mergedPages = remotePages.mapIndexedNotNull { idx, m ->
+                                    val pid = (m["id"] as? String)?.ifBlank { null } ?: return@mapIndexedNotNull null
+                                    val lp = localPagesById[pid]
+                                    InvoicePageEntity(
+                                        id = pid,
+                                        invoiceId = doc.id,
+                                        pageIndex = (m["pageIndex"] as? Number)?.toInt() ?: idx,
+                                        originalLocalPath = lp?.originalLocalPath.orEmpty(),
+                                        editedLocalPath = lp?.editedLocalPath.orEmpty(),
+                                        originalStoragePath = (m["originalStoragePath"] as? String) ?: lp?.originalStoragePath,
+                                        editedStoragePath = (m["editedStoragePath"] as? String) ?: lp?.editedStoragePath,
+                                        originalSha256 = (m["originalSha256"] as? String) ?: lp?.originalSha256.orEmpty(),
+                                        editedSha256 = (m["editedSha256"] as? String) ?: lp?.editedSha256.orEmpty(),
+                                        rotationDegrees = lp?.rotationDegrees ?: 0,
+                                        contrastBoost = lp?.contrastBoost ?: false,
+                                        cropInsetPercent = lp?.cropInsetPercent ?: 0,
+                                        byteSize = (m["byteSize"] as? Number)?.toLong() ?: lp?.byteSize ?: 0L,
+                                        mimeType = lp?.mimeType ?: "image/jpeg"
+                                    )
+                                }
+                                if (mergedPages.isNotEmpty()) {
+                                    db.invoiceDao().upsertPages(mergedPages)
+                                }
                             }
                         }
                     }
@@ -593,42 +635,65 @@ class CloudSyncManager(
 
         // 6. Audit logs (Owner & Manager)
         if (role == EmployeeRole.OWNER || role == EmployeeRole.MANAGER) {
-            listeners += companyRef.collection("auditLogs").limit(200).addSnapshotListener { snaps, err ->
-                if (err != null) return@addSnapshotListener
+            registered += companyRef.collection("auditLogs").limit(200).addSnapshotListener { snaps, err ->
+                if (listenerGeneration != gen || activeCompanyId != companyId) return@addSnapshotListener
+                if (err != null) {
+                    recordListenerError(err, OperationType.LIST, "companies/$companyId/auditLogs")
+                    return@addSnapshotListener
+                }
                 if (snaps == null) return@addSnapshotListener
                 scope.launch {
-                    for (doc in snaps.documents) {
-                        val serverTs = (doc.get("serverTimestamp") as? Timestamp)?.toDate()?.time
-                        db.auditLogDao().insert(
-                            AuditLogEntity(
-                                id = doc.id,
-                                companyId = companyId,
-                                actorUid = doc.getString("actorUid") ?: "",
-                                actorName = doc.getString("actorName") ?: "",
-                                actorRole = doc.getString("actorRole") ?: "",
-                                action = doc.getString("action") ?: "",
-                                targetType = doc.getString("targetType") ?: "",
-                                targetId = doc.getString("targetId") ?: "",
-                                summary = doc.getString("summary") ?: "",
-                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
-                                serverTimestamp = serverTs,
-                                syncState = SyncState.SYNCED
+                    if (listenerGeneration != gen || activeCompanyId != companyId) return@launch
+                    db.withTransaction {
+                        for (doc in snaps.documents) {
+                            val serverTs = (doc.get("serverTimestamp") as? Timestamp)?.toDate()?.time
+                            db.auditLogDao().insert(
+                                AuditLogEntity(
+                                    id = doc.id,
+                                    companyId = companyId,
+                                    actorUid = doc.getString("actorUid") ?: "",
+                                    actorName = doc.getString("actorName") ?: "",
+                                    actorRole = doc.getString("actorRole") ?: "",
+                                    action = doc.getString("action") ?: "",
+                                    targetType = doc.getString("targetType") ?: "",
+                                    targetId = doc.getString("targetId") ?: "",
+                                    summary = doc.getString("summary") ?: "",
+                                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
+                                    serverTimestamp = serverTs,
+                                    syncState = SyncState.SYNCED
+                                )
                             )
-                        )
+                        }
                     }
                 }
+            }
+        }
+
+        synchronized(listenerLock) {
+            if (listenerGeneration == gen) {
+                listeners.addAll(registered)
+            } else {
+                registered.forEach { runCatching { it.remove() } }
             }
         }
     }
 
     fun stopListeners() {
-        listeners.forEach { runCatching { it.remove() } }
-        listeners.clear()
-        activeCompanyId = ""
+        synchronized(listenerLock) {
+            listenerGeneration++
+            listeners.forEach { runCatching { it.remove() } }
+            listeners.clear()
+            activeCompanyId = ""
+        }
         _syncState.value = _syncState.value.copy(
             isConnecting = false,
             isAuthenticated = FirebaseServices.isAuthenticated
         )
+    }
+
+    fun shutdown() {
+        stopListeners()
+        scope.cancel()
     }
 
     /**
@@ -747,6 +812,34 @@ class CloudSyncManager(
         )
     }
 
+    private suspend fun resolveDeferredFailureOutcome(targetCompanyId: String): SyncFlushOutcome? {
+        val failedItems = db.syncQueueDao().getFailedItemsByCompany(targetCompanyId)
+        if (failedItems.isEmpty()) return null
+        val firstFailed = failedItems.first()
+        val rawMsg = firstFailed.lastError ?: "Sync failed"
+        val detail = formatQueueItemError(firstFailed, rawMsg)
+        val classified = FirebaseServices.classifyBackendError(IllegalStateException(rawMsg))
+        val outcome = if (classified.health == BackendHealth.ACCESS_DENIED ||
+            classified.health == BackendHealth.BACKEND_NOT_CONFIGURED
+        ) {
+            SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED
+        } else {
+            SyncFlushOutcome.FAILED_TRANSIENT
+        }
+        repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, detail)
+        _syncState.value = _syncState.value.copy(
+            isSyncing = false,
+            currentlyUploadingInvoiceId = null,
+            backendHealth = if (outcome == SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED) {
+                classified.health
+            } else {
+                _syncState.value.backendHealth
+            },
+            lastError = detail
+        )
+        return outcome
+    }
+
     /**
      * Core serialized queue processor shared by production Firebase sync and concurrency tests.
      */
@@ -758,226 +851,239 @@ class CloudSyncManager(
         },
         uploadItem: suspend (com.delifar.app.data.SyncQueueEntity, Boolean) -> Unit
     ): SyncFlushOutcome = queueFlushMutex.withLock {
-        if (retryFailedFirst && targetCompanyId.isNotBlank()) {
-            repository.retryFailedSyncItems(targetCompanyId)
-        }
-
-        val now = System.currentTimeMillis()
-        val rawDue = db.syncQueueDao().getDueItemsForCompany(targetCompanyId, now)
-        if (rawDue.isEmpty()) {
-            val failedItems = db.syncQueueDao().getFailedItemsByCompany(targetCompanyId)
-            val pendingCount = db.syncQueueDao().getPendingCountNow(targetCompanyId)
-            if (failedItems.isNotEmpty()) {
-                val firstFailed = failedItems.first()
-                val detail = formatQueueItemError(firstFailed, firstFailed.lastError ?: "Sync failed")
-                _syncState.value = _syncState.value.copy(
-                    isSyncing = false,
-                    lastError = detail
-                )
-                return@withLock SyncFlushOutcome.FAILED_TRANSIENT
+        try {
+            if (retryFailedFirst && targetCompanyId.isNotBlank()) {
+                repository.retryFailedSyncItems(targetCompanyId)
             }
-            val check = verifyConnectionWhenEmpty()
-            return@withLock when (check.health) {
-                BackendHealth.REACHABLE -> {
-                    val syncedAt = if (pendingCount == 0) System.currentTimeMillis() else _syncState.value.lastSyncedAt
-                    if (syncedAt != null && pendingCount == 0) {
-                        repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNCED_AT, syncedAt.toString())
-                        repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, "")
+
+            val now = System.currentTimeMillis()
+            val rawDue = db.syncQueueDao().getDueItemsForCompany(targetCompanyId, now)
+            if (rawDue.isEmpty()) {
+                val pendingCount = db.syncQueueDao().getPendingCountNow(targetCompanyId)
+                resolveDeferredFailureOutcome(targetCompanyId)?.let { return@withLock it }
+                val check = verifyConnectionWhenEmpty()
+                return@withLock when (check.health) {
+                    BackendHealth.REACHABLE -> {
+                        val syncedAt = if (pendingCount == 0) System.currentTimeMillis() else _syncState.value.lastSyncedAt
+                        if (syncedAt != null && pendingCount == 0) {
+                            repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNCED_AT, syncedAt.toString())
+                            repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, "")
+                        }
+                        _syncState.value = _syncState.value.copy(
+                            firebaseConfigured = true,
+                            isAuthenticated = true,
+                            isOnline = true,
+                            isSyncing = false,
+                            currentlyUploadingInvoiceId = null,
+                            backendHealth = BackendHealth.REACHABLE,
+                            lastSyncedAt = syncedAt,
+                            lastError = null
+                        )
+                        SyncFlushOutcome.SUCCEEDED
                     }
-                    _syncState.value = _syncState.value.copy(
-                        firebaseConfigured = true,
-                        isAuthenticated = true,
-                        isOnline = true,
-                        isSyncing = false,
-                        backendHealth = BackendHealth.REACHABLE,
-                        lastSyncedAt = syncedAt,
-                        lastError = null
-                    )
-                    SyncFlushOutcome.SUCCEEDED
-                }
-                BackendHealth.ACCESS_DENIED, BackendHealth.BACKEND_NOT_CONFIGURED -> {
-                    val detail = check.detail ?: "Access denied or backend not configured."
-                    repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, detail)
-                    _syncState.value = _syncState.value.copy(
-                        isOnline = false,
-                        isSyncing = false,
-                        backendHealth = check.health,
-                        lastError = detail
-                    )
-                    SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED
-                }
-                BackendHealth.NOT_SIGNED_IN -> {
-                    _syncState.value = _syncState.value.copy(
-                        isAuthenticated = false,
-                        isOnline = false,
-                        isSyncing = false,
-                        backendHealth = BackendHealth.NOT_SIGNED_IN
-                    )
-                    SyncFlushOutcome.NOT_SIGNED_IN
-                }
-                else -> {
-                    _syncState.value = _syncState.value.copy(
-                        isOnline = false,
-                        isSyncing = false,
-                        backendHealth = BackendHealth.OFFLINE,
-                        lastError = check.detail
-                    )
-                    SyncFlushOutcome.OFFLINE
+                    BackendHealth.ACCESS_DENIED, BackendHealth.BACKEND_NOT_CONFIGURED -> {
+                        val detail = check.detail ?: "Access denied or backend not configured."
+                        repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, detail)
+                        _syncState.value = _syncState.value.copy(
+                            isOnline = false,
+                            isSyncing = false,
+                            currentlyUploadingInvoiceId = null,
+                            backendHealth = check.health,
+                            lastError = detail
+                        )
+                        SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED
+                    }
+                    BackendHealth.NOT_SIGNED_IN -> {
+                        _syncState.value = _syncState.value.copy(
+                            isAuthenticated = false,
+                            isOnline = false,
+                            isSyncing = false,
+                            currentlyUploadingInvoiceId = null,
+                            backendHealth = BackendHealth.NOT_SIGNED_IN
+                        )
+                        SyncFlushOutcome.NOT_SIGNED_IN
+                    }
+                    else -> {
+                        _syncState.value = _syncState.value.copy(
+                            isOnline = false,
+                            isSyncing = false,
+                            currentlyUploadingInvoiceId = null,
+                            backendHealth = BackendHealth.OFFLINE,
+                            lastError = check.detail
+                        )
+                        SyncFlushOutcome.OFFLINE
+                    }
                 }
             }
-        }
 
-        val priorityOrder = mapOf(
-            "company" to 0,
-            "employee" to 1,
-            "invitation" to 2,
-            "store" to 3,
-            "job" to 4,
-            "invoice_file" to 5,
-            "invoice" to 6,
-            "audit" to 7
-        )
-        val due = rawDue.sortedWith(
-            compareBy<com.delifar.app.data.SyncQueueEntity> { priorityOrder[it.entityType] ?: 99 }
-                .thenBy { it.createdAt }
-        )
+            val priorityOrder = mapOf(
+                "company" to 0,
+                "employee" to 1,
+                "invitation" to 2,
+                "store" to 3,
+                "job" to 4,
+                "invoice_file" to 5,
+                "invoice" to 6,
+                "audit" to 7
+            )
+            val due = rawDue.sortedWith(
+                compareBy<com.delifar.app.data.SyncQueueEntity> { priorityOrder[it.entityType] ?: 99 }
+                    .thenBy { it.createdAt }
+            )
 
-        _syncState.value = _syncState.value.copy(
-            firebaseConfigured = true,
-            isAuthenticated = true,
-            isSyncing = true,
-            lastError = null,
-            currentlyUploadingInvoiceId = null
-        )
-        var allSucceeded = true
-        var lastClassifiedHealth = BackendHealth.REACHABLE
-        var lastErrorMsg: String? = null
-        val failedInvoiceFileIds = mutableSetOf<String>()
+            _syncState.value = _syncState.value.copy(
+                firebaseConfigured = true,
+                isAuthenticated = true,
+                isSyncing = true,
+                lastError = null,
+                currentlyUploadingInvoiceId = null
+            )
+            var allSucceeded = true
+            var lastClassifiedHealth = BackendHealth.REACHABLE
+            var lastErrorMsg: String? = null
+            val failedInvoiceFileIds = mutableSetOf<String>()
 
-        for (queuedItem in due) {
-            // Re-read inside the mutex so already-deleted/synced items are never re-processed or resurrected
-            val item = db.syncQueueDao().getById(queuedItem.id) ?: continue
-            if (item.status == SyncState.SYNCED) {
-                db.syncQueueDao().delete(item.id)
-                continue
-            }
-            if (item.entityType == "invoice" && item.entityId in failedInvoiceFileIds) {
-                continue // Wait until binary files upload before writing invoice metadata
-            }
-            if (item.entityType == "invoice_file" || item.entityType == "invoice") {
-                _syncState.value = _syncState.value.copy(currentlyUploadingInvoiceId = item.entityId)
-            }
-            val wasRetry = item.retryCount > 0 || item.status == SyncState.FAILED || !item.lastError.isNullOrBlank()
-            try {
-                uploadItem(item, wasRetry)
-                db.syncQueueDao().delete(item.id)
-            } catch (e: Exception) {
-                allSucceeded = false
-                if (item.entityType == "invoice_file") {
-                    failedInvoiceFileIds += item.entityId
+            for (queuedItem in due) {
+                // Re-read inside the mutex so already-deleted/synced items are never re-processed or resurrected
+                val item = db.syncQueueDao().getById(queuedItem.id) ?: continue
+                if (item.status == SyncState.SYNCED) {
+                    db.syncQueueDao().delete(item.id)
+                    continue
                 }
-                val rawError = if (e is InvoiceUploadException) {
-                    "[${e.code.name}] ${e.message}"
-                } else {
-                    e.message ?: e.javaClass.simpleName
+                if (item.entityType == "invoice" && item.entityId in failedInvoiceFileIds) {
+                    continue // Wait until binary files upload before writing invoice metadata
                 }
-                val diagnosticError = formatQueueItemError(item, rawError)
-                Log.w(TAG, "Sync failed for $diagnosticError")
+                if (item.entityType == "invoice_file" || item.entityType == "invoice") {
+                    _syncState.value = _syncState.value.copy(currentlyUploadingInvoiceId = item.entityId)
+                }
+                val wasRetry = item.retryCount > 0 || item.status == SyncState.FAILED || !item.lastError.isNullOrBlank()
+                try {
+                    uploadItem(item, wasRetry)
+                    db.syncQueueDao().delete(item.id)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    allSucceeded = false
+                    if (item.entityType == "invoice_file") {
+                        failedInvoiceFileIds += item.entityId
+                    }
+                    val rawError = if (e is InvoiceUploadException) {
+                        "[${e.code.name}] ${e.message}"
+                    } else {
+                        e.message ?: e.javaClass.simpleName
+                    }
+                    val nextRetries = item.retryCount + 1
+                    val diagnosticError = formatQueueItemError(item.copy(retryCount = nextRetries), rawError)
+                    Log.w(TAG, "Sync failed for $diagnosticError")
 
-                // Self-healing recovery: if invoice metadata ran after a crash before its binaries finished,
-                // re-enqueue the binary upload so the next sync cycle uploads missing attachments first.
-                if (item.entityType == "invoice" &&
-                    e is InvoiceUploadException &&
-                    e.code == InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS
-                ) {
+                    // Self-healing recovery: if invoice metadata ran after a crash before its binaries finished,
+                    // re-enqueue the binary upload so the next sync cycle uploads missing attachments first.
+                    if (item.entityType == "invoice" &&
+                        e is InvoiceUploadException &&
+                        e.code == InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS
+                    ) {
+                        db.syncQueueDao().upsert(
+                            com.delifar.app.data.SyncQueueEntity(
+                                id = "invoice_file:${item.entityId}",
+                                companyId = item.companyId,
+                                entityType = "invoice_file",
+                                entityId = item.entityId,
+                                operation = "upload_file",
+                                status = SyncState.PENDING,
+                                createdAt = System.currentTimeMillis(),
+                                nextAttemptAt = System.currentTimeMillis()
+                            )
+                        )
+                    }
+
+                    val isPermanentFileError = e is InvoiceUploadException &&
+                        e.code != InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS
+                    val baseBackoffMs = if (isPermanentFileError) 5L * 60_000L else 30_000L
+                    val backoffMs = (baseBackoffMs * (1L shl nextRetries.coerceAtMost(4))).coerceAtMost(60L * 60_000L)
                     db.syncQueueDao().upsert(
-                        com.delifar.app.data.SyncQueueEntity(
-                            id = "invoice_file:${item.entityId}",
-                            companyId = item.companyId,
-                            entityType = "invoice_file",
-                            entityId = item.entityId,
-                            operation = "upload_file",
-                            status = SyncState.PENDING,
-                            createdAt = System.currentTimeMillis(),
-                            nextAttemptAt = System.currentTimeMillis()
+                        item.copy(
+                            retryCount = nextRetries,
+                            status = SyncState.FAILED,
+                            lastError = rawError,
+                            nextAttemptAt = System.currentTimeMillis() + backoffMs
                         )
                     )
-                }
-
-                val nextRetries = item.retryCount + 1
-                val isPermanentFileError = e is InvoiceUploadException &&
-                    e.code != InvoiceUploadErrorCode.INCOMPLETE_REMOTE_ATTACHMENTS
-                val baseBackoffMs = if (isPermanentFileError) 5L * 60_000L else 30_000L
-                val backoffMs = (baseBackoffMs * (1L shl nextRetries.coerceAtMost(4))).coerceAtMost(60L * 60_000L)
-                db.syncQueueDao().upsert(
-                    item.copy(
-                        retryCount = nextRetries,
-                        status = SyncState.FAILED,
-                        lastError = rawError,
-                        nextAttemptAt = System.currentTimeMillis() + backoffMs
-                    )
-                )
-                if (item.entityType == "invoice" || item.entityType == "invoice_file") {
-                    db.invoiceDao().updateSyncAndStatus(
-                        invoiceId = item.entityId,
-                        syncState = SyncState.FAILED,
-                        status = InvoiceStatus.UPLOAD_FAILED,
-                        serverTs = null,
-                        signedServerTs = null,
-                        error = rawError
-                    )
-                }
-                if (e !is InvoiceUploadException) {
-                    val classified = FirebaseServices.classifyBackendError(e)
-                    if (classified.health == BackendHealth.ACCESS_DENIED ||
-                        classified.health == BackendHealth.BACKEND_NOT_CONFIGURED ||
-                        classified.health == BackendHealth.NOT_SIGNED_IN ||
-                        classified.health == BackendHealth.OFFLINE
-                    ) {
-                        lastClassifiedHealth = classified.health
+                    if (item.entityType == "invoice" || item.entityType == "invoice_file") {
+                        val currentInv = db.invoiceDao().getInvoiceWithPages(item.entityId)?.invoice
+                        val preservedStatus = if (currentInv?.status == InvoiceStatus.VOIDED) {
+                            InvoiceStatus.VOIDED
+                        } else {
+                            InvoiceStatus.UPLOAD_FAILED
+                        }
+                        db.invoiceDao().updateSyncAndStatus(
+                            invoiceId = item.entityId,
+                            syncState = SyncState.FAILED,
+                            status = preservedStatus,
+                            serverTs = currentInv?.serverUpdatedAt,
+                            signedServerTs = null,
+                            error = rawError
+                        )
                     }
+                    if (e !is InvoiceUploadException) {
+                        val classified = FirebaseServices.classifyBackendError(e)
+                        if (classified.health == BackendHealth.ACCESS_DENIED ||
+                            classified.health == BackendHealth.BACKEND_NOT_CONFIGURED ||
+                            classified.health == BackendHealth.NOT_SIGNED_IN ||
+                            classified.health == BackendHealth.OFFLINE
+                        ) {
+                            lastClassifiedHealth = classified.health
+                        }
+                    }
+                    lastErrorMsg = diagnosticError
+                    _syncState.value = _syncState.value.copy(lastError = diagnosticError)
                 }
-                lastErrorMsg = diagnosticError
-                _syncState.value = _syncState.value.copy(lastError = diagnosticError)
             }
-        }
 
-        val remainingPending = runCatching { db.syncQueueDao().getPendingCountNow(targetCompanyId) }.getOrDefault(0)
-        val remainingFailed = runCatching { db.syncQueueDao().getFailedCountNow(targetCompanyId) }.getOrDefault(0)
-        val fullySyncedNow = allSucceeded && remainingPending == 0 && remainingFailed == 0
-        val completedAt = System.currentTimeMillis()
+            val remainingPending = runCatching { db.syncQueueDao().getPendingCountNow(targetCompanyId) }.getOrDefault(0)
+            val remainingFailed = runCatching { db.syncQueueDao().getFailedCountNow(targetCompanyId) }.getOrDefault(0)
+            if (allSucceeded && remainingFailed > 0) {
+                resolveDeferredFailureOutcome(targetCompanyId)?.let { return@withLock it }
+            }
+            val fullySyncedNow = allSucceeded && remainingPending == 0 && remainingFailed == 0
+            val completedAt = System.currentTimeMillis()
 
-        if (fullySyncedNow) {
-            repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNCED_AT, completedAt.toString())
-            repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, "")
-        } else if (!lastErrorMsg.isNullOrBlank()) {
-            repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, lastErrorMsg)
-        }
+            if (fullySyncedNow) {
+                repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNCED_AT, completedAt.toString())
+                repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, "")
+            } else if (!lastErrorMsg.isNullOrBlank()) {
+                repository.setPreference(com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR, lastErrorMsg)
+            }
 
-        _syncState.value = _syncState.value.copy(
-            isSyncing = false,
-            currentlyUploadingInvoiceId = null,
-            isOnline = allSucceeded && lastClassifiedHealth == BackendHealth.REACHABLE,
-            backendHealth = if (allSucceeded) BackendHealth.REACHABLE else lastClassifiedHealth,
-            lastSyncedAt = if (fullySyncedNow) completedAt else _syncState.value.lastSyncedAt,
-            lastError = if (fullySyncedNow) null else lastErrorMsg
-        )
+            _syncState.value = _syncState.value.copy(
+                isSyncing = false,
+                currentlyUploadingInvoiceId = null,
+                isOnline = allSucceeded && lastClassifiedHealth == BackendHealth.REACHABLE,
+                backendHealth = if (allSucceeded) BackendHealth.REACHABLE else lastClassifiedHealth,
+                lastSyncedAt = if (fullySyncedNow) completedAt else _syncState.value.lastSyncedAt,
+                lastError = if (fullySyncedNow) null else lastErrorMsg
+            )
 
-        when {
-            allSucceeded -> SyncFlushOutcome.SUCCEEDED
-            lastClassifiedHealth == BackendHealth.ACCESS_DENIED ||
-                lastClassifiedHealth == BackendHealth.BACKEND_NOT_CONFIGURED ->
-                SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED
-            lastClassifiedHealth == BackendHealth.NOT_SIGNED_IN ->
-                SyncFlushOutcome.NOT_SIGNED_IN
-            lastClassifiedHealth == BackendHealth.OFFLINE ->
-                SyncFlushOutcome.OFFLINE
-            else -> SyncFlushOutcome.FAILED_TRANSIENT
+            when {
+                allSucceeded -> SyncFlushOutcome.SUCCEEDED
+                lastClassifiedHealth == BackendHealth.ACCESS_DENIED ||
+                    lastClassifiedHealth == BackendHealth.BACKEND_NOT_CONFIGURED ->
+                    SyncFlushOutcome.ACCESS_DENIED_OR_UNCONFIGURED
+                lastClassifiedHealth == BackendHealth.NOT_SIGNED_IN ->
+                    SyncFlushOutcome.NOT_SIGNED_IN
+                lastClassifiedHealth == BackendHealth.OFFLINE ->
+                    SyncFlushOutcome.OFFLINE
+                else -> SyncFlushOutcome.FAILED_TRANSIENT
+            }
+        } finally {
+            _syncState.value = _syncState.value.copy(
+                isSyncing = false,
+                currentlyUploadingInvoiceId = null
+            )
         }
     }
 
     private fun formatQueueItemError(item: com.delifar.app.data.SyncQueueEntity, errorText: String): String =
-        "${item.entityType} (${item.operation}) [${item.entityId}]: $errorText"
+        "${item.entityType} (${item.operation}) [${item.entityId}] (attempt ${item.retryCount}): $errorText"
 
     private suspend fun uploadQueueItemToFirebase(
         fs: com.google.firebase.firestore.FirebaseFirestore,
@@ -1153,14 +1259,22 @@ class CloudSyncManager(
                                 immutable: Boolean
                             ): String {
                                 val ref = activeStorage.reference.child(storagePath)
-                                if (immutable) {
-                                    // Idempotent retry: if immutable file already reached Storage on a prior
+                                if (immutable || inv.signed) {
+                                    // Idempotent retry: if file already reached Storage on a prior
                                     // interrupted attempt with matching byte size & sha256, reuse it without overwriting.
                                     val existingMeta = runCatching { ref.metadata.await() }.getOrNull()
-                                    if (existingMeta != null && existingMeta.sizeBytes == validated.byteSize) {
+                                    if (existingMeta != null) {
                                         val remoteSha = existingMeta.getCustomMetadata("sha256")
-                                        if (remoteSha.isNullOrBlank() || remoteSha.equals(validated.sha256, ignoreCase = true)) {
+                                        val matches = existingMeta.sizeBytes == validated.byteSize &&
+                                            (remoteSha.isNullOrBlank() || remoteSha.equals(validated.sha256, ignoreCase = true))
+                                        if (matches) {
                                             return storagePath
+                                        }
+                                        if (immutable) {
+                                            throw InvoiceUploadException(
+                                                InvoiceUploadErrorCode.CHECKSUM_MISMATCH,
+                                                "Remote attachment $storagePath differs from local file checksum/size and cannot be overwritten."
+                                            )
                                         }
                                     }
                                 }
@@ -1194,15 +1308,16 @@ class CloudSyncManager(
                                     db.invoiceDao().upsertPages(listOf(page.copy(originalStoragePath = origRemote)))
                                 }
                                 if (editRemote.isNullOrBlank()) {
+                                    val (editedPath, editedMime, editedExt) = InvoiceSyncValidator.resolveEditedAttachmentSource(page)
                                     val validatedEdit = InvoiceSyncValidator.validateLocalAttachment(
-                                        localPath = page.editedLocalPath,
+                                        localPath = editedPath,
                                         label = "invoice #${inv.invoiceNumber} page ${page.pageIndex + 1} edited",
-                                        expectedMimeType = "image/jpeg",
-                                        expectedSha256 = page.editedSha256,
+                                        expectedMimeType = editedMime,
+                                        expectedSha256 = page.editedSha256.ifBlank { null },
                                         maxBytes = MAX_INVOICE_FILE_BYTES
                                     )
-                                    val path = "companies/${inv.companyId}/invoices/${inv.id}/edit_${page.id}.jpg"
-                                    editRemote = uploadVerifiedAttachment(path, validatedEdit, immutable = false)
+                                    val path = "companies/${inv.companyId}/invoices/${inv.id}/edit_${page.id}.$editedExt"
+                                    editRemote = uploadVerifiedAttachment(path, validatedEdit, immutable = inv.signed)
                                     db.invoiceDao().upsertPages(
                                         listOf(page.copy(originalStoragePath = origRemote, editedStoragePath = editRemote))
                                     )
@@ -1220,7 +1335,8 @@ class CloudSyncManager(
                                 )
                                 val path = "companies/${inv.companyId}/invoices/${inv.id}/signature.png"
                                 sigRemote = uploadVerifiedAttachment(path, validatedSig, immutable = true)
-                                db.invoiceDao().upsertInvoice(inv.copy(signatureStoragePath = sigRemote))
+                                val latestInv = db.invoiceDao().getInvoiceWithPages(inv.id)?.invoice ?: inv
+                                db.invoiceDao().upsertInvoice(latestInv.copy(signatureStoragePath = sigRemote))
                             }
 
                             var pdfRemote = inv.signedPdfStoragePath
@@ -1234,9 +1350,10 @@ class CloudSyncManager(
                                 )
                                 val path = "companies/${inv.companyId}/invoices/${inv.id}/signed_v${inv.version}.pdf"
                                 pdfRemote = uploadVerifiedAttachment(path, validatedPdf, immutable = true)
+                                val latestInv = db.invoiceDao().getInvoiceWithPages(inv.id)?.invoice ?: inv
                                 db.invoiceDao().upsertInvoice(
-                                    inv.copy(
-                                        signatureStoragePath = sigRemote,
+                                    latestInv.copy(
+                                        signatureStoragePath = sigRemote ?: latestInv.signatureStoragePath,
                                         signedPdfStoragePath = pdfRemote,
                                         signedPdfSha256 = validatedPdf.sha256
                                     )
@@ -1249,58 +1366,88 @@ class CloudSyncManager(
                         val iwp = db.invoiceDao().getInvoiceWithPages(item.entityId)
                         if (iwp != null) {
                             val inv = iwp.invoice
-                            // Never allow an invoice with missing remote files to be written as SYNCHRONIZED
-                            InvoiceSyncValidator.assertInvoiceReadyForMetadataSync(iwp)
-
                             val finalStatus = when {
                                 inv.status == InvoiceStatus.VOIDED -> InvoiceStatus.VOIDED
                                 inv.signed -> InvoiceStatus.SYNCHRONIZED
                                 else -> InvoiceStatus.NOT_SIGNED
                             }
-                            val invRef = companyRef.collection("invoices").document(inv.id)
-
-                            if (inv.status == InvoiceStatus.VOIDED && inv.signed) {
-                                // Match strict Firestore immutability rule: voiding touches only approved keys
-                                val existingRemote = runCatching { invRef.get(Source.SERVER).await() }.getOrNull()
-                                if (existingRemote != null && existingRemote.exists() && existingRemote.getBoolean("signed") == true) {
-                                    if (existingRemote.getString("status") != InvoiceStatus.VOIDED) {
-                                        invRef.update(
-                                            mapOf(
-                                                "status" to InvoiceStatus.VOIDED,
-                                                "voidedReason" to (inv.voidedReason ?: "Voided"),
-                                                "modifiedAt" to inv.modifiedAt,
-                                                "serverUpdatedAt" to FieldValue.serverTimestamp()
-                                            )
-                                        ).await()
-                                    }
-                                } else {
-                                    invRef.set(buildFullInvoicePayload(iwp, finalStatus), SetOptions.merge()).await()
+                            val invoiceGateway = object : InvoiceMetadataGateway {
+                                override suspend fun fetchInvoiceFromServer(
+                                    companyId: String,
+                                    invoiceId: String
+                                ): RemoteInvoiceSnapshot? {
+                                    val snap = fs.collection("companies")
+                                        .document(companyId)
+                                        .collection("invoices")
+                                        .document(invoiceId)
+                                        .get(Source.SERVER)
+                                        .await()
+                                    if (!snap.exists()) return null
+                                    return RemoteInvoiceSnapshot(
+                                        documentId = snap.id,
+                                        id = snap.getString("id") ?: "",
+                                        companyId = snap.getString("companyId") ?: "",
+                                        storeId = snap.getString("storeId") ?: "",
+                                        invoiceNumber = snap.getString("invoiceNumber") ?: "",
+                                        version = (snap.getLong("version") ?: 1L).toInt(),
+                                        status = snap.getString("status") ?: "",
+                                        signed = snap.getBoolean("signed") ?: false,
+                                        recipientName = snap.getString("recipientName") ?: "",
+                                        signatureStoragePath = snap.getString("signatureStoragePath"),
+                                        signedPdfStoragePath = snap.getString("signedPdfStoragePath"),
+                                        signedPdfSha256 = snap.getString("signedPdfSha256"),
+                                        signedServerAtMillis = (snap.get("signedServerAt") as? Timestamp)?.toDate()?.time
+                                    )
                                 }
-                            } else {
-                                try {
-                                    invRef.set(buildFullInvoicePayload(iwp, finalStatus), SetOptions.merge()).await()
-                                } catch (invErr: Exception) {
-                                    // Idempotent recovery after partial success on immutable signed invoices:
-                                    // if server already has this exact signed invoice in SYNCHRONIZED state, treat as synced.
-                                    if (inv.signed &&
-                                        finalStatus == InvoiceStatus.SYNCHRONIZED &&
-                                        IdempotentAuditUploader.isPermissionDeniedOrAlreadyExists(invErr)
-                                    ) {
-                                        val existingRemote = runCatching { invRef.get(Source.SERVER).await() }.getOrNull()
-                                        val alreadySynced = existingRemote != null &&
-                                            existingRemote.exists() &&
-                                            existingRemote.getBoolean("signed") == true &&
-                                            existingRemote.getString("status") == InvoiceStatus.SYNCHRONIZED &&
-                                            existingRemote.getString("companyId") == inv.companyId &&
-                                            existingRemote.getString("invoiceNumber") == inv.invoiceNumber &&
-                                            (existingRemote.getLong("version")?.toInt() == inv.version) &&
-                                            existingRemote.getString("signedPdfSha256") == inv.signedPdfSha256
-                                        if (!alreadySynced) throw invErr
-                                    } else {
-                                        throw invErr
-                                    }
+
+                                override suspend fun createInvoice(
+                                    companyId: String,
+                                    invoiceId: String,
+                                    payload: Map<String, Any?>
+                                ) {
+                                    fs.collection("companies")
+                                        .document(companyId)
+                                        .collection("invoices")
+                                        .document(invoiceId)
+                                        .set(payload)
+                                        .await()
+                                }
+
+                                override suspend fun mergeUnsignedInvoice(
+                                    companyId: String,
+                                    invoiceId: String,
+                                    payload: Map<String, Any?>
+                                ) {
+                                    fs.collection("companies")
+                                        .document(companyId)
+                                        .collection("invoices")
+                                        .document(invoiceId)
+                                        .set(payload, SetOptions.merge())
+                                        .await()
+                                }
+
+                                override suspend fun updateSignedInvoiceFields(
+                                    companyId: String,
+                                    invoiceId: String,
+                                    fields: Map<String, Any?>
+                                ) {
+                                    fs.collection("companies")
+                                        .document(companyId)
+                                        .collection("invoices")
+                                        .document(invoiceId)
+                                        .update(fields)
+                                        .await()
                                 }
                             }
+
+                            val uploadResult = InvoiceSyncValidator.uploadInvoiceMetadataIdempotently(
+                                iwp = iwp,
+                                finalStatus = finalStatus,
+                                wasRetry = wasRetry,
+                                gateway = invoiceGateway,
+                                buildFullPayload = ::buildFullInvoicePayload,
+                                serverTimestampValue = FieldValue.serverTimestamp()
+                            )
 
                             val confirmedNow = System.currentTimeMillis()
                             db.invoiceDao().updateSyncAndStatus(
@@ -1308,7 +1455,9 @@ class CloudSyncManager(
                                 syncState = SyncState.SYNCED,
                                 status = finalStatus,
                                 serverTs = confirmedNow,
-                                signedServerTs = if (inv.signed) confirmedNow else null,
+                                signedServerTs = if (inv.signed) {
+                                    uploadResult.signedServerAtMillis ?: inv.signedServerAt ?: confirmedNow
+                                } else null,
                                 error = null
                             )
                         }
@@ -1398,7 +1547,8 @@ class CloudSyncManager(
         email: String
     ): Result<String> {
         val functions = FirebaseServices.functionsOrNull()
-        if (functions != null && FirebaseServices.authOrNull()?.currentUser != null) {
+        val authUser = FirebaseServices.authOrNull()?.currentUser
+        if (functions != null && authUser != null) {
             return runCatching {
                 val res = functions.getHttpsCallable("acceptEmployeeInvitation")
                     .call(mapOf("inviteCode" to inviteCode.trim().uppercase()))
@@ -1408,8 +1558,34 @@ class CloudSyncManager(
                 val companyId = data["companyId"] as? String ?: ""
                 val role = data["role"] as? String ?: EmployeeRole.DRIVER
                 if (companyId.isNotBlank()) {
-                    repository.setPreference(com.delifar.app.data.PrefKeys.ACTIVE_COMPANY_ID, companyId)
-                    repository.setPreference(com.delifar.app.data.PrefKeys.ACTIVE_USER_ROLE, role)
+                    val effectiveName = authUser.displayName?.takeIf { it.isNotBlank() }
+                        ?: displayName.trim().ifBlank { authUser.email?.substringBefore("@") ?: "Team Member" }
+                    val effectiveEmail = authUser.email?.trim()?.lowercase()?.ifBlank { null }
+                        ?: email.trim().lowercase()
+                    val now = System.currentTimeMillis()
+                    db.withTransaction {
+                        repository.setPreference(com.delifar.app.data.PrefKeys.ACTIVE_COMPANY_ID, companyId)
+                        repository.setPreference(com.delifar.app.data.PrefKeys.ACTIVE_USER_UID, authUser.uid)
+                        repository.setPreference(com.delifar.app.data.PrefKeys.ACTIVE_USER_ROLE, role)
+                        if (effectiveName.isNotBlank()) {
+                            repository.setPreference(com.delifar.app.data.PrefKeys.ACTIVE_USER_NAME, effectiveName)
+                        }
+                        if (effectiveEmail.isNotBlank()) {
+                            repository.setPreference(com.delifar.app.data.PrefKeys.ACTIVE_USER_EMAIL, effectiveEmail)
+                        }
+                        db.employeeDao().upsert(
+                            EmployeeEntity(
+                                uid = authUser.uid,
+                                companyId = companyId,
+                                displayName = effectiveName,
+                                email = effectiveEmail,
+                                role = role,
+                                active = true,
+                                joinedAt = now,
+                                lastActiveAt = now
+                            )
+                        )
+                    }
                 }
                 companyId
             }

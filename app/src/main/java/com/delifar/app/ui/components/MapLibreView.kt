@@ -1,28 +1,42 @@
 package com.delifar.app.ui.components
 
+import android.annotation.SuppressLint
+import android.content.ComponentCallbacks2
+import android.content.res.Configuration
 import android.graphics.Color as AndroidColor
 import android.graphics.RectF
 import android.view.MotionEvent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -35,8 +49,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.delifar.app.R
 import com.delifar.app.network.GeoPoint
 import com.delifar.app.network.GeoValidation
+import com.delifar.app.ui.theme.AmberAccent
+import com.delifar.app.ui.theme.AmberContainer
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
@@ -63,7 +80,8 @@ data class MapStorePin(
     val lat: Double,
     val lon: Double,
     val colorHex: String,
-    val activeJobCount: Int
+    val activeJobCount: Int,
+    val stopOrder: Int? = null
 )
 
 private const val ROUTE_SOURCE_ID = "delifar-route-source"
@@ -89,22 +107,75 @@ private fun rememberLifecycleManagedMapView(): MapView {
         }
     }
     DisposableEffect(lifecycleOwner, mapView) {
+        var started = false
+        var resumed = false
+        var destroyed = false
+
+        fun ensureStarted() {
+            if (!started && !destroyed) {
+                runCatching { mapView.onStart() }
+                started = true
+            }
+        }
+        fun ensureResumed() {
+            ensureStarted()
+            if (!resumed && !destroyed) {
+                runCatching { mapView.onResume() }
+                resumed = true
+            }
+        }
+        fun ensurePaused() {
+            if (resumed && !destroyed) {
+                runCatching { mapView.onPause() }
+                resumed = false
+            }
+        }
+        fun ensureStopped() {
+            ensurePaused()
+            if (started && !destroyed) {
+                runCatching { mapView.onStop() }
+                started = false
+            }
+        }
+        fun ensureDestroyed() {
+            ensureStopped()
+            if (!destroyed) {
+                runCatching { mapView.onDestroy() }
+                destroyed = true
+            }
+        }
+
+        // Sync immediately with current lifecycle state when attached dynamically
+        val currentState = lifecycleOwner.lifecycle.currentState
+        if (currentState.isAtLeast(Lifecycle.Event.ON_RESUME.targetState)) {
+            ensureResumed()
+        } else if (currentState.isAtLeast(Lifecycle.Event.ON_START.targetState)) {
+            ensureStarted()
+        }
+
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> mapView.onStart()
-                Lifecycle.Event.ON_RESUME -> mapView.onResume()
-                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
-                Lifecycle.Event.ON_STOP -> mapView.onStop()
-                Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
+                Lifecycle.Event.ON_START -> ensureStarted()
+                Lifecycle.Event.ON_RESUME -> ensureResumed()
+                Lifecycle.Event.ON_PAUSE -> ensurePaused()
+                Lifecycle.Event.ON_STOP -> ensureStopped()
+                Lifecycle.Event.ON_DESTROY -> ensureDestroyed()
                 else -> Unit
             }
         }
+        val memCallback = object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) {}
+            override fun onConfigurationChanged(newConfig: Configuration) {}
+            override fun onLowMemory() {
+                if (!destroyed) runCatching { mapView.onLowMemory() }
+            }
+        }
         lifecycleOwner.lifecycle.addObserver(observer)
+        context.applicationContext.registerComponentCallbacks(memCallback)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            runCatching { mapView.onPause() }
-            runCatching { mapView.onStop() }
-            runCatching { mapView.onDestroy() }
+            runCatching { context.applicationContext.unregisterComponentCallbacks(memCallback) }
+            ensureDestroyed()
         }
     }
     return mapView
@@ -129,6 +200,9 @@ fun DeliFarMapLibreView(
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
     var loadedStyleUrl by remember { mutableStateOf<String?>(null) }
     var styleReady by remember { mutableStateOf(false) }
+    var mapLoading by remember { mutableStateOf(true) }
+    var mapLoadFailed by remember { mutableStateOf(false) }
+    var styleReloadNonce by remember { mutableIntStateOf(0) }
 
     val latestOnSelect by rememberUpdatedState(onSelectStore)
     val latestPins by rememberUpdatedState(pins)
@@ -139,12 +213,14 @@ fun DeliFarMapLibreView(
     fun syncOverlayData(style: Style) {
         // Update pins GeoJSON
         val pinFeatures = latestPins.filter { GeoValidation.isValidCoordinate(it.lat, it.lon) }.map { pin ->
+            val label = if (pin.stopOrder != null) "#${pin.stopOrder} ${pin.title}" else pin.title
             Feature.fromGeometry(Point.fromLngLat(pin.lon, pin.lat)).apply {
                 addStringProperty("storeId", pin.storeId)
-                addStringProperty("title", pin.title)
+                addStringProperty("title", label)
                 addStringProperty("color", pin.colorHex)
                 addBooleanProperty("selected", pin.storeId == latestSelectedId)
                 addNumberProperty("jobs", pin.activeJobCount)
+                addNumberProperty("stopOrder", pin.stopOrder ?: 0)
             }
         }
         val pinCollection = FeatureCollection.fromFeatures(pinFeatures)
@@ -275,8 +351,14 @@ fun DeliFarMapLibreView(
 
     fun fitCameraToPins(map: MapLibreMap) {
         val valid = latestPins.filter { GeoValidation.isValidCoordinate(it.lat, it.lon) }
+        val minLat = valid.minOfOrNull { it.lat } ?: 0.0
+        val maxLat = valid.maxOfOrNull { it.lat } ?: 0.0
+        val minLon = valid.minOfOrNull { it.lon } ?: 0.0
+        val maxLon = valid.maxOfOrNull { it.lon } ?: 0.0
+        val nearSinglePoint = valid.size > 1 && (maxLat - minLat) < 0.0005 && (maxLon - minLon) < 0.0005
+
         when {
-            valid.size == 1 -> {
+            valid.size == 1 || nearSinglePoint -> {
                 val p = valid.first()
                 map.animateCamera(
                     CameraUpdateFactory.newCameraPosition(
@@ -309,13 +391,34 @@ fun DeliFarMapLibreView(
         }
     }
 
-    LaunchedEffect(mapLibreMap, styleUrl) {
+    DisposableEffect(mapView) {
+        val failListener = MapView.OnDidFailLoadingMapListener {
+            mapLoading = false
+            mapLoadFailed = true
+        }
+        val finishListener = MapView.OnDidFinishLoadingStyleListener {
+            mapLoading = false
+            mapLoadFailed = false
+        }
+        mapView.addOnDidFailLoadingMapListener(failListener)
+        mapView.addOnDidFinishLoadingStyleListener(finishListener)
+        onDispose {
+            mapView.removeOnDidFailLoadingMapListener(failListener)
+            mapView.removeOnDidFinishLoadingStyleListener(finishListener)
+        }
+    }
+
+    LaunchedEffect(mapLibreMap, styleUrl, styleReloadNonce) {
         val map = mapLibreMap ?: return@LaunchedEffect
-        if (loadedStyleUrl != styleUrl) {
+        if (loadedStyleUrl != styleUrl || styleReloadNonce > 0) {
             styleReady = false
+            mapLoading = true
+            mapLoadFailed = false
             loadedStyleUrl = styleUrl
             map.setStyle(Style.Builder().fromUri(styleUrl)) { style ->
                 styleReady = true
+                mapLoading = false
+                mapLoadFailed = false
                 syncOverlayData(style)
                 fitCameraToPins(map)
             }
@@ -365,11 +468,14 @@ fun DeliFarMapLibreView(
                             )
                             val clusterHits = map.queryRenderedFeatures(hitBox, PINS_CLUSTER_LAYER_ID)
                             if (clusterHits.isNotEmpty()) {
-                                val nextZoom = (map.cameraPosition.zoom + 2.2).coerceAtMost(16.0)
+                                val clusterCenter = (clusterHits.firstOrNull()?.geometry() as? Point)?.let {
+                                    LatLng(it.latitude(), it.longitude())
+                                } ?: latLng
+                                val nextZoom = (map.cameraPosition.zoom + 2.4).coerceAtMost(16.0)
                                 map.animateCamera(
                                     CameraUpdateFactory.newCameraPosition(
                                         CameraPosition.Builder()
-                                            .target(latLng)
+                                            .target(clusterCenter)
                                             .zoom(nextZoom)
                                             .build()
                                     ),
@@ -389,8 +495,11 @@ fun DeliFarMapLibreView(
 
                         if (loadedStyleUrl != styleUrl) {
                             loadedStyleUrl = styleUrl
+                            mapLoading = true
                             map.setStyle(Style.Builder().fromUri(styleUrl)) { style ->
                                 styleReady = true
+                                mapLoading = false
+                                mapLoadFailed = false
                                 syncOverlayData(style)
                                 fitCameraToPins(map)
                             }
@@ -399,6 +508,66 @@ fun DeliFarMapLibreView(
                 }
             }
         )
+
+        if (mapLoading && !mapLoadFailed) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                shadowElevation = 3.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text(
+                        text = lStr(R.string.map_loading_tiles),
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+        } else if (mapLoadFailed) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = AmberContainer,
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.WifiOff,
+                        contentDescription = null,
+                        tint = AmberAccent,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = lStr(R.string.map_offline_fallback),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AmberAccent,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    TextButton(
+                        onClick = { styleReloadNonce++ },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.defaultMinSize(minHeight = 44.dp)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(lStr(R.string.map_retry))
+                    }
+                }
+            }
+        }
 
         // One-handed zoom & recenter controls (44dp comfortable touch targets)
         Surface(
@@ -438,6 +607,7 @@ fun DeliFarMapLibreView(
  * Users can view the geocoded pin, tap anywhere on the map to adjust/place the pin manually,
  * zoom in for rooftop precision, and then confirm the coordinates before saving.
  */
+@SuppressLint("ClickableViewAccessibility")
 @Composable
 fun StorePinPickerMap(
     styleUrl: String,
@@ -600,15 +770,15 @@ fun StorePinPickerMap(
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 IconButton(
                     onClick = { mapLibreMap?.animateCamera(CameraUpdateFactory.zoomIn(), 200) },
-                    modifier = Modifier.size(34.dp)
+                    modifier = Modifier.size(44.dp)
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "Zoom in", modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Add, contentDescription = "Zoom in", modifier = Modifier.size(18.dp))
                 }
                 IconButton(
                     onClick = { mapLibreMap?.animateCamera(CameraUpdateFactory.zoomOut(), 200) },
-                    modifier = Modifier.size(34.dp)
+                    modifier = Modifier.size(44.dp)
                 ) {
-                    Icon(Icons.Default.Remove, contentDescription = "Zoom out", modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Remove, contentDescription = "Zoom out", modifier = Modifier.size(18.dp))
                 }
                 if (pin != null && pin.isValid()) {
                     IconButton(
@@ -623,9 +793,9 @@ fun StorePinPickerMap(
                                 300
                             )
                         },
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(44.dp)
                     ) {
-                        Icon(Icons.Default.MyLocation, contentDescription = "Center on pin", modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.MyLocation, contentDescription = "Center on pin", modifier = Modifier.size(18.dp))
                     }
                 }
             }

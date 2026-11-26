@@ -449,10 +449,18 @@ class DeliFarRepository(
             storeDao.assignCompanyToUnmigrated(companyId)
             jobDao.assignCompanyToUnmigrated(companyId)
             invoiceDao.assignCompanyToUnmigrated(companyId)
+            if (actorUid.isNotBlank() && !actorUid.startsWith("local_")) {
+                storeDao.reassignUpdatedByUid(companyId, "", actorUid)
+                jobDao.reassignUpdatedByUid(companyId, "", actorUid)
+                invoiceDao.reassignCreatedByUid(companyId, "", actorUid)
+            }
 
             unmigratedStores.forEach { enqueueSyncInternal(companyId, "store", it.id, "upsert") }
             unmigratedJobs.forEach { enqueueSyncInternal(companyId, "job", it.id, "upsert") }
-            unmigratedInvoices.forEach { enqueueSyncInternal(companyId, "invoice", it.id, "upsert") }
+            unmigratedInvoices.forEach {
+                enqueueSyncInternal(companyId, "invoice_file", it.id, "upload_file")
+                enqueueSyncInternal(companyId, "invoice", it.id, "upsert")
+            }
 
             recordAuditInternal(
                 companyId, actorUid, actorName, actorRole,
@@ -527,11 +535,14 @@ class DeliFarRepository(
             employeeDao.upsert(newEmp)
             employeeDao.deleteByUidInCompany(oldOwnerUid, localCompanyId)
 
-            // Reassign local author references created under the temporary local_* UID without duplicating rows
+            // Reassign local author references created under the temporary local_* UID (or blank) without duplicating rows
             storeDao.reassignUpdatedByUid(localCompanyId, oldOwnerUid, cleanAuthUid)
+            storeDao.reassignUpdatedByUid(localCompanyId, "", cleanAuthUid)
             jobDao.reassignUpdatedByUid(localCompanyId, oldOwnerUid, cleanAuthUid)
+            jobDao.reassignUpdatedByUid(localCompanyId, "", cleanAuthUid)
             jobDao.reassignAssignedDriverUid(localCompanyId, oldOwnerUid, cleanAuthUid, cleanName)
             invoiceDao.reassignCreatedByUid(localCompanyId, oldOwnerUid, cleanAuthUid)
+            invoiceDao.reassignCreatedByUid(localCompanyId, "", cleanAuthUid)
             invoiceDao.reassignAssignedDriverUid(localCompanyId, oldOwnerUid, cleanAuthUid)
 
             prefDao.upsertAll(
@@ -636,13 +647,22 @@ class DeliFarRepository(
         if (inv.companyId.isBlank()) {
             return Result.failure(IllegalStateException("Register or join a company before uploading invoices to the cloud."))
         }
+        val isVoided = inv.status == InvoiceStatus.VOIDED
+        if (!isVoided &&
+            inv.signed &&
+            inv.status == InvoiceStatus.SYNCHRONIZED &&
+            inv.syncState == SyncState.SYNCED &&
+            com.delifar.app.cloud.InvoiceSyncValidator.hasAllRemoteAttachments(iwp)
+        ) {
+            return Result.success(Unit)
+        }
         val issues = com.delifar.app.cloud.InvoiceSyncValidator.inspectLocalAttachmentIssues(iwp)
         if (issues.isNotEmpty()) {
             val detail = issues.joinToString(" ")
             invoiceDao.updateSyncAndStatus(
                 invoiceId = inv.id,
                 syncState = SyncState.FAILED,
-                status = InvoiceStatus.UPLOAD_FAILED,
+                status = if (isVoided) InvoiceStatus.VOIDED else InvoiceStatus.UPLOAD_FAILED,
                 serverTs = inv.serverUpdatedAt,
                 signedServerTs = inv.signedServerAt,
                 error = detail
@@ -650,7 +670,7 @@ class DeliFarRepository(
             return Result.failure(IllegalStateException(detail))
         }
 
-        val nextStatus = if (inv.status == InvoiceStatus.VOIDED) InvoiceStatus.VOIDED else InvoiceStatus.PENDING_UPLOAD
+        val nextStatus = if (isVoided) InvoiceStatus.VOIDED else InvoiceStatus.PENDING_UPLOAD
         db.withTransaction {
             invoiceDao.updateSyncAndStatus(
                 invoiceId = inv.id,
@@ -665,6 +685,9 @@ class DeliFarRepository(
                 enqueueSyncInternal(inv.companyId, "invoice_file", inv.id, "upload_file")
             }
             enqueueSyncInternal(inv.companyId, "invoice", inv.id, "upsert")
+            if (syncQueueDao.getFailedCountNow(inv.companyId) == 0) {
+                prefDao.upsert(PreferenceEntity(PrefKeys.LAST_SYNC_ERROR, ""))
+            }
         }
         return Result.success(Unit)
     }
@@ -1523,8 +1546,11 @@ class DeliFarRepository(
     }
 
     suspend fun retryFailedSyncItems(companyId: String = "") {
-        if (companyId.isBlank()) syncQueueDao.resetFailedForRetry()
-        else syncQueueDao.resetFailedForCompany(companyId)
+        db.withTransaction {
+            if (companyId.isBlank()) syncQueueDao.resetFailedForRetry()
+            else syncQueueDao.resetFailedForCompany(companyId)
+            prefDao.upsert(PreferenceEntity(PrefKeys.LAST_SYNC_ERROR, ""))
+        }
     }
 
     // --- Search Cache & Notification Receipts ---

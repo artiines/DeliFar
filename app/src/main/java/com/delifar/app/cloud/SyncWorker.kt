@@ -26,16 +26,20 @@ class SyncWorker(
         val syncManager = CloudSyncManager(applicationContext, db, repo)
 
         val prefs = repo.getPreferences()
-        val outcome = runCatching {
-            syncManager.flushPendingQueueDetailed(prefs.activeCompanyId)
-        }.getOrElse { err ->
+        val outcome = try {
             runCatching {
-                repo.setPreference(
-                    com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR,
-                    err.message ?: "Background sync failed."
-                )
+                syncManager.flushPendingQueueDetailed(prefs.activeCompanyId)
+            }.getOrElse { err ->
+                runCatching {
+                    repo.setPreference(
+                        com.delifar.app.data.PrefKeys.LAST_SYNC_ERROR,
+                        err.message ?: "Background sync failed."
+                    )
+                }
+                SyncFlushOutcome.FAILED_TRANSIENT
             }
-            SyncFlushOutcome.FAILED_TRANSIENT
+        } finally {
+            syncManager.shutdown()
         }
 
         return when (outcome) {
